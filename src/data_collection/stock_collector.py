@@ -142,13 +142,38 @@ class StockCollector:
             self.db.rollback()
 
     def run_daily_update(self):
-        """Run daily update for all stocks."""
+        """Run daily update for all stocks in the Database."""
+        # 1. Seed: Ensure default stocks from .env are in DB
         self.update_stock_list_in_db()
-        for symbol in self.symbols:
+        
+        # 2. Fetch ALL stocks from DB (Source of Truth) to include dynamically added ones
+        try:
+            res = self.db.execute(text("SELECT symbol FROM stocks"))
+            all_symbols = [row[0] for row in res.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch stock list from DB: {e}")
+            all_symbols = self.symbols # Fallback to env list
+            
+        logger.info(f"Starting Daily Update for {len(all_symbols)} stocks: {all_symbols}")
+
+        for symbol in all_symbols:
+            logger.info(f"Processing {symbol}...")
             self.fetch_history(symbol, days=settings.LOOKBACK_DAYS)
             time.sleep(1) # Be nice to API
 
 if __name__ == "__main__":
     db = SessionLocal()
     collector = StockCollector(db)
-    collector.run_daily_update()
+    
+    logger.info("Starting Stock Collector Service (Continuous Mode)...")
+    
+    while True:
+        try:
+            logger.info("--- Starting Daily Update Cycle ---")
+            collector.run_daily_update()
+            logger.info("--- Cycle Completed. Sleeping for 12 Hours... ---")
+        except Exception as e:
+            logger.error(f"Critical Error in Collector Loop: {e}")
+        
+        # Sleep for 12 hours (43200 seconds)
+        time.sleep(43200)

@@ -14,14 +14,38 @@ import os
 
 logger = get_logger()
 
+from src.utils.config import get_settings
+import redis
+
 class ModelTrainer:
     def __init__(self, interval: str = '1d'):
         self.db = SessionLocal()
         self.collector = StockCollector(self.db)
-        self.feature_engine = TechnicalIndicators(self.db) # Need to update this too?
+        self.feature_engine = TechnicalIndicators(self.db) 
         self.preprocessor = DataPreprocessor(sequence_length=60)
         self.interval = interval
+        
+        settings = get_settings()
+        self.redis = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True)
 
+    # Decorator for status tracking
+    def track_status(func):
+        def wrapper(self, *args, **kwargs):
+            symbol = kwargs.get('symbol', args[0] if args else "Unknown")
+            status_key = f"status:{symbol}"
+            try:
+                self.redis.set(status_key, "Running")
+                self.redis.set("status:global", f"Training {symbol}")
+                return func(self, *args, **kwargs)
+            finally:
+                self.redis.set(status_key, "Idle")
+                # Only clear global if it was set by this process (simplification: just set to Idle or check)
+                # For MVP, just setting to Idle is 'okay' but concurrency issues exist. 
+                # Assuming single trainer worker:
+                self.redis.set("status:global", "Idle")
+        return wrapper
+
+    @track_status
     def run_pipeline(self, symbol="BBCA.JK"):
         logger.info(f"Starting pipeline for {symbol} ({self.interval})")
         
@@ -298,6 +322,13 @@ class ModelTrainer:
                     
                     # Insert into model_metadata
                     import json
+                    
+                    # Prevent duplicates: Delete old metadata for this version/model
+                    self.db.execute(text("DELETE FROM model_metadata WHERE model_name=:name AND version=:ver"), {
+                        "name": f"{symbol}_LSTM",
+                        "ver": "v1"
+                    })
+                    
                     self.db.execute(text("""
                         INSERT INTO model_metadata
                         (model_name, version, training_samples, features_used, is_active)
@@ -404,12 +435,21 @@ if __name__ == "__main__":
     # In production, this should be handled by Celery or robust scheduler.
     
     intervals = ['1d', '1h', '15m']
-    symbols = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"] # Default list
-    
     logger.info("Starting Continuous Model Trainer...")
     
     while True:
         try:
+            # Dynamic: Fetch all stocks from DB
+            db = SessionLocal()
+            try:
+                res = db.execute(text("SELECT symbol FROM stocks"))
+                symbols = [row[0] for row in res.fetchall()]
+            except Exception as e:
+                logger.error(f"Failed to fetch stock list: {e}")
+                symbols = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"] # Fallback
+            finally:
+                db.close()
+                
             for symbol in symbols:
                 for interval in intervals:
                     try:

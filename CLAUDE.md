@@ -25,7 +25,7 @@ Sistem machine learning berbasis Docker untuk memprediksi pergerakan harga saham
 │  ┌──────────────────┐      ┌──────────────────┐            │
 │  │  Data Collector  │──────▶│  PostgreSQL DB   │            │
 │  │  - Yahoo Finance │      │  - Historical    │            │
-│  │  - News API      │      │  - Predictions   │            │
+│  │  - Google News   │      │  - Predictions   │            │
 │  │  - IDX Data      │      │  - Performance   │            │
 │  └──────────────────┘      └──────────────────┘            │
 │           │                                                  │
@@ -193,7 +193,6 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - YAHOO_API_KEY=${YAHOO_API_KEY}
-      - NEWS_API_KEY=${NEWS_API_KEY}
     volumes:
       - ./data:/app/data
       - ./src:/app/src
@@ -267,7 +266,6 @@ DB_PORT=5432
 
 # API Keys
 YAHOO_API_KEY=your_yahoo_finance_key
-NEWS_API_KEY=your_news_api_key
 ALPHA_VANTAGE_KEY=your_alpha_vantage_key
 
 # Model Configuration

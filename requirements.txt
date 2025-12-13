@@ -22,6 +22,7 @@ nltk==3.8.1
 textblob==0.17.1
 newspaper3k==0.2.8
 feedparser==6.0.10
+deep-translator==1.11.4
 
 # Technical Indicators
 ta==0.11.0

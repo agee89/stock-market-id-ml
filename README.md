@@ -4,8 +4,8 @@ System prediksi pasar saham Indonesia (IDX) otomatis menggunakan Machine Learnin
 
 ## 🌟 Fitur Utama
 
-*   **Automated Data Collection**: Mengambil data historis saham harian secara otomatis dari Yahoo Finance (via `yfinance`).
-*   **Feature Engineering**: Perhitungan otomatis indikator teknikal (RSI, MACD, Bollinger Bands, SMA, EMA).
+*   **Automated Data Collection**: Mengambil data historis saham harian dari `yfinance` dan berita keuangan dari **Google News RSS (Indonesia)**.
+*   **Feature Engineering**: Perhitungan otomatis indikator teknikal (RSI, MACD, Bollinger Bands, SMA, EMA) & sentimen berita.
 *   **Hybrid ML Models**: Menggunakan dua model sekaligus:
     *   **LSTM (Long Short-Term Memory)**: Untuk menangkap pola urutan (time-series) yang kompleks.
     *   **XGBoost**: Untuk regresi yang kuat dan efisien.
@@ -40,7 +40,7 @@ System prediksi pasar saham Indonesia (IDX) otomatis menggunakan Machine Learnin
     ```bash
     cp .env.example .env
     ```
-    *Tips: Untuk lokal, password bebas (misal: `stockml123`).*
+    *Tips: Untuk lokal, password bebas (misal: `stockml123`). Project ini tidak memerlukan API Key eksternal (menggunakan sumber open/public).*
 
 3.  **Jalankan dengan Docker**
     ```bash
@@ -56,12 +56,12 @@ System prediksi pasar saham Indonesia (IDX) otomatis menggunakan Machine Learnin
 ## 📂 Struktur Project
 
 ```
-├── .env                # Variabel lingkungan (Password DB, API Keys)
+├── .env                # Variabel lingkungan (Password DB)
 ├── docker-compose.yml  # Konfigurasi service Docker
 ├── src/
 │   ├── api/            # Backend FastAPI
 │   ├── dashboard/      # Frontend Streamlit
-│   ├── data_collection/# Script pengumpul data (yfinance)
+│   ├── data_collection/# Script pengumpul data (yfinance & Google News)
 │   ├── feature_engineering/ # Logika indikator teknikal
 │   ├── models/         # Definisi model LSTM & XGBoost
 │   ├── training/       # Pipeline pelatihan model
@@ -83,7 +83,7 @@ Cek log service `data_collector` untuk memastikan tidak ada error koneksi:
 ```bash
 docker logs stock_ml_collector
 ```
-Pastikan library `yfinance` sudah versi terbaru (sudah dihandle di `requirements.txt`).
+Pastikan koneksi internet stabil untuk mengambil data dari Yahoo Finance dan Google News.
 
 ### 3. Port Conflict
 Jika port default bentrok, ubah di `docker-compose.yml`. Konfigurasi saat ini:
@@ -91,26 +91,51 @@ Jika port default bentrok, ubah di `docker-compose.yml`. Konfigurasi saat ini:
 *   Dashboard: `8505`
 *   Postgres: `5435`
 
-## 🧠 Penjelasan Fitur Dashboard
+## 🧠 Penjelasan Fitur Dashboard (Market Intelligence)
 
-### 1. Tombol "Generate Prediction" 🔮
+### 1. Menambah Saham Baru (Dynamic Stock Addition) ➕
+Tidak perlu lagi mengedit file konfigurasi manual.
+*   **Caranya**: Buka Sidebar -> Menu **"➕ Add New Stock"**.
+*   Input kode saham (misal: `GOTO.JK`) dan klik tombol Add.
+*   Sistem akan otomatis mendaftarkan saham, mendownload history, dan melatih modelnya dalam siklus berikutnya.
+
+### 2. Real-Time AI Status & Force Retrain 🚦
+*   **AI Status**: Indikator di sidebar yang menunjukkan aktivitas mesin secara real-time.
+    *   🟢 **Ready / Idle**: Sistem standby.
+    *   🟠 **System Busy / Training**: Sistem sedang melatih model di background (Global Awareness).
+*   **Force Retrain**: Tombol untuk memaksa pelatihan *saat ini juga* (Instant). Gunakan ini jika baru saja menambah saham baru dan ingin melihat hasilnya segera tanpa menunggu antrian otomatis.
+
+### 3. Tombol "Generate Prediction" 🔮
 Tombol ini berfungsi untuk **meramal harga saham besok** berdasarkan data yang sudah dipelajari model.
 *   **Cara Kerja**: Sistem mengambil 60 hari data terakhir dari database, lalu meminta model LSTM (yang sudah disimpan) untuk memprediksi 1 langkah ke depan.
 *   **Kapan dipakai**: Saat Anda ingin tahu perkiraan harga penutupan (Close Price) untuk hari berikutnya.
 
-### 2. Tombol "Retrain Model" 🔄
-Tombol ini berfungsi untuk **mengajari ulang otak AI** dengan data terbaru.
-*   **Cara Kerja**: Sistem akan mendownload data terbaru dari Yahoo Finance, lalu melatih ulang model LSTM & XGBoost dari nol menggunakan data tersebut. Model lama akan ditimpa dengan model baru yang lebih pintar.
-*   **Kapan dipakai**: Lakukan ini secara berkala (misal seminggu sekali) agar AI tetap update dengan tren pasar terkini. *Proses ini berjalan di background dan butuh waktu beberapa menit.*
-
-### 3. Metric Dashboard Intelligence 🧠
+### 4. Metric Dashboard Intelligence 🧠
 *   **Current Price**: Harga penutupan terakhir (Real).
 *   **AI Target**: Prediksi harga penutupan berikutnya.
 *   **Win Rate**: Persentase keberhasilan prediksi (Prediksi Arah Benar / Total Trades). *Akan 0% di awal sebelum ada history prediksi.*
 *   **Error Margin**: Rata-rata selisih prediksi dengan harga asli dalam Rupiah (misal: ± Rp 300). Semakin kecil semakin akurat.
 *   **Data Knowledge**: Berapa lama data historis yang dipelajari AI (misal: 10 Tahun). Menunjukkan "kematangan" model.
 
-## 📊 Monitoring & Logs (Cek Log Manual)
+### 5. Penjelasan Metadata AI (Brain Details) 🧠
+Bagian ini menjelaskan status "kesehatan" dan "kecerdasan" model yang sedang aktif:
+
+*   **Data Maturity**: Indikator jumlah data latih.
+    *   🔴 **Low (Early Stage)**: Data < 4 Tahun. Kurang stabil.
+    *   🟠 **Medium (Developing)**: Data 4-8 Tahun. Cukup baik.
+    *   🟢 **High (Mature)**: Data > 8 Tahun. Sangat stabil dan mengenali siklus pasar panjang.
+*   **Training Date**: Waktu terakhir kali model dilatih ulang (Retrain).
+*   **Model Version**: Versi arsitektur model (Misal: `v1`). Digunakan untuk tracking eksperimen.
+*   **Macro Awareness**: Indikator apakah model mempertimbangkan faktor eksternal.
+    *   ✅ **ON**: Model melihat IHSG & Kurs USD saat memprediksi saham (Lebih Pintar).
+    *   ❌ **OFF**: Model hanya melihat harga saham itu sendiri (Single-vision).
+
+## 📊 Monitoring & Logs (Continuous Services)
+
+Sistem ini didesain untuk berjalan **Non-Stop (24/7)**.
+*   **Data Collector**: Otomatis bangun setiap 12 jam untuk cek data baru.
+*   **ML Trainer**: Otomatis cek antrian pelatihan model setiap 1 jam.
+*   **Dashboard**: Menampilkan status real-time sistem.
 
 Anda bisa memantau aktivitas setiap komponen secara real-time menggunakan perintah berikut di terminal:
 
@@ -139,7 +164,7 @@ Jika Anda ingin menyimpan kode ini ke repository GitHub Anda (`https://github.co
     ```bash
     git status
     git add .
-    git commit -m "Update project: Completed Phase 11 (Stability & Dashboard Upgrade)"
+    git commit -m "Update project: Completed Phase 11 & Doc Update"
     ```
 
 3.  **Pastikan Branch Utama Bernama 'main'**

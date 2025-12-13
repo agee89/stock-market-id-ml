@@ -10,9 +10,8 @@ class Settings(BaseSettings):
     DB_HOST: str
     DB_PORT: int = 5432
 
-    # API Keys
+    # API
     YAHOO_API_KEY: str | None = None
-    NEWS_API_KEY: str | None = None
     ALPHA_VANTAGE_KEY: str | None = None
 
     # Model Configuration

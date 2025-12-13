@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import time
 import os
 
 # Configuration
@@ -24,15 +25,98 @@ selected_tf_label = st.sidebar.selectbox("Select Timeframe", list(timeframe_map.
 selected_interval = timeframe_map[selected_tf_label]
 
 # Stock Selector
+# Fetch Status
+ml_status = "Idle"
+# Add New Stock UI
+with st.sidebar.expander("➕ Add New Stock"):
+    new_symbol = st.text_input("Symbol (e.g. GOTO.JK)").upper().strip()
+    if st.button("Add Stock"):
+        if new_symbol:
+            try:
+                res = requests.post(f"{API_URL}/stocks", json={"symbol": new_symbol})
+                if res.status_code == 200:
+                    st.success(f"Added {new_symbol}!")
+                    time.sleep(1)
+                    st.rerun()
+                elif res.status_code == 422: # Validation Error
+                    st.error("Invalid Symbol format")
+                else:
+                     st.warning(res.json().get('message', 'Failed'))
+            except Exception as e:
+                st.error(f"Error: {e}")
+
 stocks = []
+stock_map = {}
 try:
     res = requests.get(f"{API_URL}/stocks")
     if res.status_code == 200:
-        stocks = [s['symbol'] for s in res.json()]
+        data = res.json()
+        stocks = [s['symbol'] for s in data]
+        # Create map for display: "BBCA.JK" -> "BBCA.JK (Bank Central Asia)"
+        for s in data:
+            name_display = s['name'] if s['name'] else "Unknown"
+            # Truncate if too long
+            if len(name_display) > 25:
+                name_display = name_display[:25] + "..."
+            stock_map[s['symbol']] = f"{s['symbol']} ({name_display})"
 except:
     st.sidebar.error("API Error: Cannot fetch stocks")
 
-selected_symbol = st.sidebar.selectbox("Select Stock", stocks if stocks else ["BBCA.JK"])
+# Helper to format display
+def format_stock_label(symbol):
+    return stock_map.get(symbol, symbol)
+
+selected_symbol = st.sidebar.selectbox(
+    "Select Stock", 
+    stocks if stocks else ["BBCA.JK"],
+    format_func=format_stock_label
+)
+
+# AI Status Indicator
+ml_status = "Idle"
+status_color = "green"
+try:
+    s_res = requests.get(f"{API_URL}/status/{selected_symbol}")
+    if s_res.status_code == 200:
+        raw_status = s_res.json().get('status', 'Idle')
+        if raw_status == "Running":
+            status_color = "orange"
+            ml_status = "Training / Improving..."
+        else:
+            ml_status = "Ready / Idle"
+except:
+    ml_status = "Unknown"
+    status_color = "grey"
+
+# Fetch System Status
+global_status = "Idle"
+try:
+    g_res = requests.get(f"{API_URL}/status/system")
+    if g_res.status_code == 200:
+        raw_g = g_res.json().get('status', 'Idle')
+        if "Training" in raw_g:
+            global_status = raw_g # e.g. "Training BBCA.JK"
+
+except:
+    pass
+
+# Determine display status priority
+# If local is running -> show local
+# If local idle but global busy -> show global (yellow)
+# If both idle -> show idle
+display_status = "Ready / Idle"
+status_color = "green"
+
+if ml_status == "Training / Improving...":
+    display_status = ml_status
+    status_color = "orange"
+elif "Training" in global_status:
+    display_status = f"System Busy ({global_status})"
+    status_color = "orange"
+
+st.sidebar.markdown(f"**🤖 AI Status:** :{status_color}[{display_status}]")
+
+
 
 # Controls Area
 col_refresh, col_space, col_filter = st.columns([1.5, 3, 2])
@@ -93,7 +177,9 @@ with col_filter:
         end_date = new_end
 
 # Main Layout
-st.title(f"📈 AI Insight: {selected_symbol}")
+# Use mapped name for title
+display_title = stock_map.get(selected_symbol, selected_symbol)
+st.title(f"📈 Market Intelligence: {display_title}")
 st.caption(f"Timeframe: {selected_interval} | Model: LSTM + XGBoost")
 
 # Function to fetch data
@@ -242,15 +328,30 @@ with st.expander("🧠 AI Brain Details (Model Metadata)", expanded=False):
         # Parse Features
         import json
         features_list = []
+        raw_features = m.get('features_used', [])
+        features_list = []
         try:
-            features_list = json.loads(m.get('features_used', '[]'))
+            if isinstance(raw_features, list):
+                features_list = raw_features
+            elif isinstance(raw_features, str):
+                features_list = json.loads(raw_features)
         except:
-            pass
+            features_list = []
             
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown(f"**Data Maturity:** :{color}[{maturity}]")
-            st.markdown(f"**Training Date:** {m.get('training_date', 'N/A')}")
+            
+            # Format Date (UTC -> WIB)
+            t_date = m.get('training_date', 'N/A')
+            try:
+                if t_date != 'N/A':
+                    dt = pd.to_datetime(t_date)
+                    dt_wib = dt + pd.Timedelta(hours=7)
+                    t_date = dt_wib.strftime("%d-%b %H:%M WIB")
+            except:
+                pass
+            st.markdown(f"**Training Date:** {t_date}")
         with c2:
             st.markdown(f"**Model Version:** {m.get('version', 'v1')}")
             st.markdown(f"**Macro Awareness:** {'✅ ON' if 'ihsg_close' in features_list else '❌ OFF'}")
@@ -266,27 +367,129 @@ if 'history' in data and data['history']:
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
     
-    fig = go.Figure(data=[go.Candlestick(x=df['date'],
-                    open=df['open'],
-                    high=df['high'],
-                    low=df['low'],
-                    close=df['close'],
-                    name='Price')])
+    # Figure creation moved below to handle Chart Slicing
+
     
+    # Determine default zoom range based on interval
+    from datetime import timedelta
+    
+    max_date = df['date'].max()
+    min_date = df['date'].min()
+    range_start = min_date
+    
+    # Logic for user-friendly default view
+    if selected_interval == '1d':
+        # Show last 6 months by default
+        range_start = max_date - timedelta(days=180)
+    elif selected_interval == '1h':
+        # Show last 1 month (was 2 weeks)
+        range_start = max_date - timedelta(days=30)
+    elif selected_interval == '15m':
+        # Show last 2 weeks (was 5 days)
+        range_start = max_date - timedelta(weeks=2)
+    elif selected_interval == '5m':
+        # Show last 1 week (was 2 days)
+        range_start = max_date - timedelta(weeks=1)
+    elif selected_interval == '1m':
+         # Show last 3 days (was 6 hours)
+        range_start = max_date - timedelta(days=3)
+        
+    # Ensure start is within data bounds
+    # Ensure start is within data bounds
+    if range_start < min_date:
+        range_start = min_date
+
+    # --- NEW: Focused View Logic ---
+    st.caption("🔍 **Chart View Controls**")
+    show_full_history = st.checkbox("Show Full History (Zoom Out)", value=False, help="Uncheck to focus only on recent data for better detail.")
+    
+    # 1. Slice DataFrame Check (Focus Mode)
+    # Instead of just zooming, we actually FILTER the dataframe if the user doesn't want full history.
+    # This solves the "lack of detail" issue by forcing Plotly to auto-scale ticks for the small range.
+    chart_df = df.copy()
+    if not show_full_history:
+        chart_df = df[df['date'] >= range_start]
+        
+    # 2. X-Axis Tick Formatting (Intraday Detail)
+    # Explicitly tell Plotly how to format the time labels
+    dtick_format = None
+    if selected_interval in ['1m', '5m', '15m', '1h']:
+        dtick_format = "%H:%M\n%d-%b" # Show Hour:Minute and Date below
+        
+    fig = go.Figure(data=[go.Candlestick(x=chart_df['date'],
+                    open=chart_df['open'],
+                    high=chart_df['high'],
+                    low=chart_df['low'],
+                    close=chart_df['close'],
+                    name='Price')])
+
+    # Calculate Y-Axis Range for the VISIBLE Window (chart_df)
+    # This prevents the chart from being flattened by old high/low prices
+    if not chart_df.empty:
+        y_min = chart_df['low'].min()
+        y_max = chart_df['high'].max()
+        # Add 5% padding
+        y_padding = (y_max - y_min) * 0.05
+        y_range = [y_min - y_padding, y_max + y_padding]
+    else:
+        y_range = None # Auto
+        
+    # Define Rangebreaks (Hide non-trading time)
+    rangebreaks = []
+    rangebreaks.append(dict(bounds=["sat", "mon"])) # Hide Weekends
+    if selected_interval not in ['1d', '1wk', '1mo']:
+        rangebreaks.append(dict(values=["16:15", "08:45"])) # Hide Nights
+        
     fig.update_layout(
         title=f"{selected_symbol} - {selected_interval} Chart",
         xaxis_title="Date",
         yaxis_title="Price (IDR)",
         height=500,
         template="plotly_dark",
-        margin=dict(l=0, r=0, t=40, b=0)
+        margin=dict(l=0, r=0, t=40, b=0),
+        xaxis=dict(
+            rangeslider=dict(visible=False), # Disable range slider in Focus Mode to save space? Or Keep it? Let's keep it but optional.
+            type="date",
+            rangebreaks=rangebreaks,
+            tickformat=dtick_format # Apply custom format
+        ),
+        yaxis=dict(
+            range=y_range,
+            autorange=False if y_range else True,
+            fixedrange=False # Allow user to pan Y axis
+        )
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No historical data available. Please wait for the Collector to run.")
 
-# History & News Split
-tab1, tab2 = st.tabs(["📜 Trade History", "📰 News & Sentiment"])
+# History, News, & Company Split
+tab1, tab2, tab3 = st.tabs(["📜 Trade History", "📰 News & Sentiment", "🏢 Company Profile"])
+
+with tab3:
+    st.subheader("Company Information")
+    with st.spinner("Fetching details..."):
+        try:
+            c_res = requests.get(f"{API_URL}/company/{selected_symbol}")
+            if c_res.status_code == 200:
+                c_data = c_res.json()
+                if "error" not in c_data:
+                    st.markdown(f"### {c_data['name']}")
+                    col_c1, col_c2 = st.columns(2)
+                    col_c1.info(f"**Sector:** {c_data['sector']}")
+                    col_c2.info(f"**Industry:** {c_data['industry']}")
+                    
+                    st.markdown("#### Business Summary")
+                    st.write(c_data['summary'])
+                    
+                    if c_data['website'] and c_data['website'] != '#':
+                        st.markdown(f"🌐 [Visit Website]({c_data['website']})")
+                else:
+                    st.warning("Company details not available.")
+            else:
+                st.error("Failed to fetch company profile.")
+        except Exception as e:
+            st.error(f"Connection error: {e}")
 
 with tab1:
     if 'signals' in data and data['signals']:
@@ -299,6 +502,14 @@ with tab1:
         # Create DataFrame
         sig_df = pd.DataFrame(data['signals'])
         
+        # Format Date to WIB
+        try:
+            sig_df['date'] = pd.to_datetime(sig_df['date'])
+            # sig_df['date'] = sig_df['date'] + pd.Timedelta(hours=7) # REMOVE: Historical data is already WIB
+            sig_df['date'] = sig_df['date'].dt.strftime("%d-%b %H:%M") # Just format
+        except Exception as e:
+            pass # Keep original if failure
+
         # Format columns
         def format_dir(val):
             return "🛒 BELI" if val == "UP" else "💰 JUAL"

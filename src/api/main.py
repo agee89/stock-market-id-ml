@@ -26,15 +26,109 @@ class StockResponse(BaseModel):
 def health_check():
     return {"status": "healthy"}
 
+@app.get("/company/{symbol}")
+def get_company_profile(symbol: str):
+    import yfinance as yf
+    from deep_translator import GoogleTranslator
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        # Helper for translation
+        def trans(text):
+            try:
+                if not text or text == 'Unknown': return text
+                return GoogleTranslator(source='auto', target='id').translate(text)
+            except:
+                return text
+
+        summary_en = info.get('longBusinessSummary', 'No description available.')
+        sector_en = info.get('sector', 'Unknown')
+        industry_en = info.get('industry', 'Unknown')
+
+        return {
+            "name": info.get('longName', symbol),
+            "sector": trans(sector_en),
+            "industry": trans(industry_en),
+            "summary": trans(summary_en), # This might take 1-2s
+            "website": info.get('website', '#')
+        }
+    except Exception as e:
+        logger.error(f"Error fetching company info for {symbol}: {e}")
+        return {"error": "Failed to fetch info"}
+
+@app.get("/status/{symbol}")
+def get_ml_status(symbol: str):
+    import redis
+    from src.utils.config import get_settings
+    settings = get_settings()
+    try:
+        r = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True)
+        status = r.get(f"status:{symbol}")
+        return {"status": status if status else "Idle"}
+    except:
+        return {"status": "Unknown"}
+
+@app.get("/status/system")
+def get_system_status():
+    import redis
+    from src.utils.config import get_settings
+    settings = get_settings()
+    try:
+        r = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True)
+        status = r.get("status:global")
+        return {"status": status if status else "Idle"}
+    except:
+        return {"status": "Unknown"}
+
 @app.get("/stocks", response_model=List[StockResponse])
 def get_stocks():
     db = SessionLocal()
     try:
-        result = db.execute(text("SELECT symbol, name FROM stocks")).fetchall()
+        result = db.execute(text("SELECT symbol, name FROM stocks ORDER BY symbol")).fetchall()
         return [{"symbol": row[0], "name": row[1]} for row in result]
     except Exception as e:
         logger.error(f"Error fetching stocks: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+class StockCreate(BaseModel):
+    symbol: str
+
+@app.post("/stocks")
+def add_new_stock(stock: StockCreate, background_tasks: BackgroundTasks):
+    symbol = stock.symbol.upper().strip()
+    db = SessionLocal()
+    try:
+        # Check existing
+        exists = db.execute(text("SELECT id FROM stocks WHERE symbol=:s"), {"s": symbol}).fetchone()
+        if exists:
+             return {"status": "exists", "message": f"Stock {symbol} already exists."}
+             
+        # Get Info & Insert
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        name = info.get('longName', symbol)
+        sector = info.get('sector', 'Unknown')
+        
+        db.execute(
+            text("INSERT INTO stocks (symbol, name, sector) VALUES (:s, :n, :sec)"), 
+            {"s": symbol, "n": name, "sec": sector}
+        )
+        db.commit()
+        
+        # Trigger background fetch using Collector logic
+        from src.data_collection.stock_collector import StockCollector
+        collector = StockCollector(db)
+        background_tasks.add_task(collector.fetch_history, symbol)
+        
+        return {"status": "added", "symbol": symbol, "name": name}
+        
+    except Exception as e:
+        logger.error(f"Error adding stock {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add stock: {e}")
     finally:
         db.close()
 
