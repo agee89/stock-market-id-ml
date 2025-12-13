@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: stock_ml_db
+    environment:
+      POSTGRES_DB: stock_ml
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Jakarta
+      PGTZ: Asia/Jakarta
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5435:5432"
+    networks:
+      - stock_ml_network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: stock_ml_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - stock_ml_network
+
+  # ML Training Service
+  ml_trainer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: stock_ml_trainer
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=stock_ml
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - TZ=Asia/Jakarta
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - stock_ml_network
+    command: python -m src.training.trainer
+
+  # Data Collection Service
+  data_collector:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: stock_ml_collector
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=stock_ml
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - TZ=Asia/Jakarta
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+    depends_on:
+      - postgres
+    networks:
+      - stock_ml_network
+    command: python -m src.data_collection.stock_collector
+
+  # FastAPI Service
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: stock_ml_api
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=stock_ml
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - TZ=Asia/Jakarta
+    ports:
+      - "8005:8000"
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - ml_trainer
+    networks:
+      - stock_ml_network
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Streamlit Dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+    container_name: stock_ml_dashboard
+    environment:
+      - API_URL=http://api:8000
+      - TZ=Asia/Jakarta
+    ports:
+      - "8505:8501"
+    volumes:
+      - ./src/dashboard:/app/dashboard
+    depends_on:
+      - api
+    networks:
+      - stock_ml_network
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+
+volumes:
+  postgres_data:
+
+
+networks:
+  stock_ml_network:
+    driver: bridge
