@@ -90,6 +90,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - REDIS_HOST=redis
       - TZ=Asia/Jakarta
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
     ports:
       - "8005:8000"
     volumes:
@@ -97,6 +98,7 @@ services:
       - ./data:/app/data
       - ./models:/app/models
       - ./logs:/app/logs
+      - ./DeepSeekSytemPrompt.md:/app/DeepSeekSytemPrompt.md
     depends_on:
       - postgres
       - redis
@@ -130,4 +132,6 @@ volumes:
 
 networks:
   stock_ml_network:
+    name: stock_shared_net
     driver: bridge
+    attachable: true

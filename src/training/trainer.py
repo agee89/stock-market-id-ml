@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 from sqlalchemy import text
@@ -10,6 +11,7 @@ from src.models.lstm_model import LSTMModel
 from src.models.xgboost_model import XGBoostModel
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+from datetime import datetime, timedelta
 import os
 
 logger = get_logger()
@@ -22,7 +24,7 @@ class ModelTrainer:
         self.db = SessionLocal()
         self.collector = StockCollector(self.db)
         self.feature_engine = TechnicalIndicators(self.db) 
-        self.preprocessor = DataPreprocessor(sequence_length=60)
+        self.preprocessor = DataPreprocessor( sequence_length=60)
         self.interval = interval
         
         settings = get_settings()
@@ -50,7 +52,18 @@ class ModelTrainer:
         logger.info(f"Starting pipeline for {symbol} ({self.interval})")
         
         # 1. Collect Data
-        self.collector.fetch_history(symbol, days=3650, interval=self.interval) # Increased history
+        # 1. Collect Data
+        # Dynamic history limits based on YFinance constraints
+        if self.interval == '1m':
+            history_days = 7
+        elif self.interval in ['5m', '15m']:
+            history_days = 59
+        elif self.interval == '1h':
+            history_days = 720
+        else:
+            history_days = 3650
+            
+        self.collector.fetch_history(symbol, days=history_days, interval=self.interval)
 
         # Macro Data Handling
         MACRO_SYMBOLS = ['^JKSE', 'IDR=X']
@@ -60,7 +73,7 @@ class ModelTrainer:
 
         # Ensure Macro Data is available
         for mac in MACRO_SYMBOLS:
-            self.collector.fetch_history(mac, days=3650, interval=self.interval)
+            self.collector.fetch_history(mac, days=history_days, interval=self.interval)
 
         # Get stock_id
         stock_id = self.db.execute(text("SELECT id FROM stocks WHERE symbol=:s"), {"s": symbol}).fetchone()[0]
@@ -156,12 +169,6 @@ class ModelTrainer:
         except Exception as e:
              logger.error(f"Failed to merge macro features: {e}")
 
-        # Create Target: Next Day Close (Shift -1)
-        df['target'] = df['close'].shift(-1)
-        
-        # Clean NaNs created by indicators (e.g. SMA-200 needs 200 rows)
-        df.dropna(inplace=True)
-
         # Define Expanded Features List
         features = ['close', 'volume', 'open', 'high', 'low', 
                    'rsi_14', 'macd', 'macd_signal', 
@@ -170,9 +177,28 @@ class ModelTrainer:
         
         if 'ihsg_close' in df.columns: features.append('ihsg_close')
         if 'usd_close' in df.columns: features.append('usd_close')
+
+        # Create Target: Next Day Close (Shift -1)
+        df['target'] = df['close'].shift(-1)
+        
+        # Capture the latest data for Future Prediction BEFORE dropping NaNs available for training
+        # This ensures we can predict the 'next' step for the live/pending candle.
+        future_X_df = None
+        if len(df) >= self.preprocessor.sequence_length:
+            future_X_df = df[features].iloc[-self.preprocessor.sequence_length:].copy()
+            
+        # Clean NaNs created by indicators (e.g. SMA-200 needs 200 rows)
+        df.dropna(inplace=True)
+
+
         
         # 4. Preprocessing
         scaled_df = self.preprocessor.fit_transform(df, features)
+        
+        # Save Scaler for Inference
+        scaler_path = f"data/models/{symbol}_{self.interval}_scaler.joblib"
+        self.preprocessor.save(scaler_path)
+        logger.info(f"Scaler saved to {scaler_path}")
         
         # Target scaler
         from sklearn.preprocessing import MinMaxScaler
@@ -255,7 +281,7 @@ class ModelTrainer:
                         res = self.db.execute(text("""
                             INSERT INTO predictions (stock_id, prediction_date, target_date, predicted_direction, predicted_change_pct, predicted_price, confidence, model_version, interval, created_at)
                             VALUES (:sid, :pdate, :tdate, :pdir, :pct, :pprice, :conf, :ver, :intv, :cat)
-                            ON CONFLICT (stock_id, prediction_date, interval, model_version) DO UPDATE 
+                            ON CONFLICT (stock_id, prediction_date, interval) DO UPDATE 
                             SET predicted_price = EXCLUDED.predicted_price -- Dummy update to return ID
                             RETURNING id
                         """), {
@@ -275,14 +301,15 @@ class ModelTrainer:
                         
                         # Insert Result (Upsert)
                         self.db.execute(text("""
-                            INSERT INTO prediction_results (prediction_id, actual_direction, actual_change_pct, is_correct, error_pct, evaluated_at)
-                            VALUES (:pid, :adir, :apct, :correct, :err, NOW())
+                            INSERT INTO prediction_results (prediction_id, actual_direction, actual_change_pct, actual_price, is_correct, error_pct, evaluated_at)
+                            VALUES (:pid, :adir, :apct, :aprice, :correct, :err, NOW())
                             ON CONFLICT (prediction_id) DO UPDATE
-                            SET is_correct = EXCLUDED.is_correct, error_pct = EXCLUDED.error_pct
+                            SET is_correct = EXCLUDED.is_correct, error_pct = EXCLUDED.error_pct, actual_price = EXCLUDED.actual_price
                         """), {
                             "pid": pred_id,
                             "adir": actual_dir,
                             "apct": (actual_price - current_close) / current_close * 100,
+                            "aprice": actual_price,
                             "correct": is_win,
                             "err": abs(pred_price - actual_price) / actual_price * 100
                         })
@@ -321,7 +348,6 @@ class ModelTrainer:
                     })
                     
                     # Insert into model_metadata
-                    import json
                     
                     # Prevent duplicates: Delete old metadata for this version/model
                     self.db.execute(text("DELETE FROM model_metadata WHERE model_name=:name AND version=:ver"), {
@@ -426,6 +452,59 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Failed to save XGBoost metrics: {e}")
 
+        # --- 7. FUTURE PREDICTION (For Latest Candle) ---
+        # To ensure DB History matches the newly trained model for the *current* pending signal.
+        # Otherwise, the DB retains old 'v_live' predictions while Dashboard calc new ones.
+        try:
+            # We need the LAST sequence from the entire dataset (captured before dropna)
+            # scaled using the FITTED scaler.
+            
+            if future_X_df is not None and not future_X_df.empty:
+                # Scale using the scaler fitted on training data
+                future_X_scaled = self.preprocessor.scaler.transform(future_X_df)
+                last_sequence = future_X_scaled.reshape(1, self.preprocessor.sequence_length, len(features))
+                
+                # Predict
+                future_pred_scaled = lstm.predict(last_sequence)
+                future_pred_price = target_scaler.inverse_transform(future_pred_scaled)[0][0]
+                
+                # Get Current Close (Last row of future_X_df)
+                current_close_price = future_X_df['close'].iloc[-1]
+                current_date = future_X_df.index[-1].to_pydatetime()
+                
+                # Direction
+                f_dir = "UP" if future_pred_price > current_close_price else "DOWN"
+                f_pct = (future_pred_price - current_close_price) / current_close_price * 100
+                
+                logger.info(f"Future Prediction for {current_date}: {future_pred_price:.2f} ({f_dir})")
+                
+                # Insert Future Prediction (Overwrite existing)
+                self.db.execute(text("""
+                    INSERT INTO predictions (stock_id, prediction_date, target_date, predicted_direction, predicted_change_pct, predicted_price, confidence, model_version, interval, created_at)
+                    VALUES (:sid, :pdate, :tdate, :pdir, :pct, :pprice, :conf, :ver, :intv, :cat)
+                    ON CONFLICT (stock_id, prediction_date, interval) DO UPDATE 
+                    SET 
+                        predicted_price = EXCLUDED.predicted_price,
+                        predicted_direction = EXCLUDED.predicted_direction,
+                        predicted_change_pct = EXCLUDED.predicted_change_pct,
+                        model_version = EXCLUDED.model_version,
+                        created_at = EXCLUDED.created_at
+                """), {
+                    "sid": stock_id,
+                    "pdate": current_date,
+                    "tdate": (current_date + timedelta(days=1)).date(), # Approx target (FIXME for intraday)
+                    "pdir": f_dir,
+                    "pct": f_pct,
+                    "pprice": float(future_pred_price),
+                    "conf": 0.8,
+                    "ver": f"LSTM_v1",
+                    "intv": self.interval,
+                    "cat": datetime.now()
+                })
+                self.db.commit()
+        except Exception as e:
+            logger.error(f"Failed to generate future prediction: {e}")
+
 if __name__ == "__main__":
     import time
     
@@ -434,7 +513,7 @@ if __name__ == "__main__":
     # For now, let's just loop through them.
     # In production, this should be handled by Celery or robust scheduler.
     
-    intervals = ['1d', '1h', '15m']
+    intervals = ['1d', '1h', '15m', '1m']
     logger.info("Starting Continuous Model Trainer...")
     
     while True:
@@ -454,7 +533,26 @@ if __name__ == "__main__":
                 for interval in intervals:
                     try:
                         logger.info(f"--- Training {symbol} [{interval}] ---")
+                        
+                        # Dynamic history fetch limits based on YFinance constraints
+                        if interval == '1m':
+                            days_history = 7
+                        elif interval in ['5m', '15m']:
+                            days_history = 59 # slightly less than 60 limit
+                        elif interval == '1h':
+                            days_history = 729
+                        else:
+                            days_history = 3650
+                            
+                        # Pass dynamic history days to fetch_history, override default inside run_pipeline if needed
+                        # But run_pipeline calls fetch_history internally with hardcoded 3650 currently.
+                        # We must modify run_pipeline signature or logic first.
+                        # Wait, I can't pass 'days' to run_pipeline easily without changing its signature.
+                        # Actually, looking at line 53 of original file: self.collector.fetch_history(symbol, days=3650, interval=self.interval)
+                        
                         trainer = ModelTrainer(interval=interval)
+                        # We need to change the hardcoded 3650 inside run_pipeline.
+                        # Since I can't change run_pipeline from here, I must EDIT run_pipeline method instead.
                         trainer.run_pipeline(symbol)
                     except Exception as e:
                         logger.error(f"Training failed for {symbol} {interval}: {e}")

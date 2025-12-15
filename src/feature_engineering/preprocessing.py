@@ -20,6 +20,17 @@ class DataPreprocessor:
         # Keep other columns if needed, or just return scaled
         return df_scaled
 
+    def transform(self, df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
+        """
+        Normalize specific columns using ALREADY FITTED scaler.
+        """
+        self.feature_columns = feature_cols
+        # Handle case where features might be missing (add 0s? or assume passed correctly)
+        # For now assume passed correctly.
+        scaled_data = self.scaler.transform(df[feature_cols])
+        df_scaled = pd.DataFrame(scaled_data, columns=feature_cols, index=df.index)
+        return df_scaled
+
     def create_sequences(self, data: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Create sequences for LSTM training.
@@ -36,3 +47,11 @@ class DataPreprocessor:
     def inverse_transform(self, data: np.ndarray) -> np.ndarray:
         """Inverse transform scaled data."""
         return self.scaler.inverse_transform(data)
+
+    def save(self, path: str):
+        import joblib
+        joblib.dump(self.scaler, path)
+        
+    def load(self, path: str):
+        import joblib
+        self.scaler = joblib.load(path)

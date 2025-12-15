@@ -17,9 +17,10 @@ This project implements a full-stack machine learning system for predicting Indo
 - `init_db.sql`: Database schema with tables for stocks, indicators, sentiment, predictions.
 
 ### 2. Core Modules
-- **Data Collection**: `StockCollector` fetches history from Yahoo Finance.
+- **Data Collection**: `StockCollector` fetches history from Yahoo Finance (Daily, Hourly, 15m, 1m).
 - **Feature Engineering**: `TechnicalIndicators` calculates RSI, MACD, BB, SMA/EMA using `ta`.
-- **Preprocessing**: `DataPreprocessor` scales data and creates sequences for LSTM.
+- **Checklist Analysis**: `TraderChecklist` implements algorithmic scoring for scalping setup.
+- **Preprocessing**: `DataPreprocessor` scales data (saved for consistency) and creates sequences.
 - **Models**:
     - `LSTMModel`: Deep learning model for sequence prediction (TensorFlow).
     - `XGBoostModel`: Gradient boosting for regression.

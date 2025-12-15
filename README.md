@@ -11,6 +11,8 @@ System prediksi pasar saham Indonesia (IDX) otomatis menggunakan Machine Learnin
     *   **XGBoost**: Untuk regresi yang kuat dan efisien.
 *   **Deep History & Context**: Dilatih dengan dataset **10 Tahun (2015-Kini)**, mencakup berbagai siklus pasar.
 *   **Macro-Economic Awareness**: Mempertimbangkan pergerakan **IHSG (^JKSE)** dan **Kurs USD/IDR** sebagai konteks prediksi.
+*   **Real-Time Data Compatibility**: Menggunakan *Saved Scaler* & *Dynamic Macro Fetching* untuk memastikan prediksi live 100% konsisten dengan data training.
+*   **Scalping Ready**: Mendukung interval **1 Menit (1m)** untuk trading ultra-cepat, selain 15m, 1h, dan 1d.
 *   **Reproducible AI**: Menggunakan *Locked Random Seeds* untuk hasil training yang konsisten dan stabil.
 *   **Interactive Dashboard**: UI berbasis Streamlit untuk memvisualisasikan data, sinyal Beli/Jual, dan kalkulasi Profit/Loss real-time.
 *   **REST API**: Endpoint FastAPI untuk integrasi sistem lain.
@@ -96,10 +98,22 @@ Jika port default bentrok, ubah di `docker-compose.yml`. Konfigurasi saat ini:
 ### 1. Menambah Saham Baru (Dynamic Stock Addition) ➕
 Tidak perlu lagi mengedit file konfigurasi manual.
 *   **Caranya**: Buka Sidebar -> Menu **"➕ Add New Stock"**.
-*   Input kode saham (misal: `GOTO.JK`) dan klik tombol Add.
-*   Sistem akan otomatis mendaftarkan saham, mendownload history, dan melatih modelnya dalam siklus berikutnya.
+*   **Input**: Kode saham (contoh: `BBRI.JK`, `TLKM.JK`).
+*   **Proses**: Sistem akan otomatis memvalidasi ke Yahoo Finance, mengambil data historis, melatih model awal, dan menambahkannya ke *Market Watch*.
 
-### 2. Real-Time AI Status & Force Retrain 🚦
+### 2. AI Trading Analyst (DeepSeek Integration) 🤖
+Analisis teknikal mendalam berbasis AI untuk setiap saham.
+*   **Multi-Timeframe Analysis**: Menggabungkan data Daily, H1, dan M15.
+*   **Sentiment & Recommendation**: Memberikan opini "Bullish/Bearish" berdasarkan indikator teknikal (SMA, RSI, Bollinger Bands).
+*   **Actionable Insights**: Saran entry, exit, dan manajemen risiko.
+
+### 3. Smart Trade History & Checklist ✅
+Tracking kinerja trading yang lebih transparan dan bersih.
+*   **Smart Filter**: Otomatis menyembunyikan trade "Flat/Closed" (0% PnL) agar history lebih mudah dibaca.
+*   **Trader Checklist**: Daftar periksa otomatis sebelum entry (Trend, Volatilitas, Psikologi Market).
+*   **Real-time Status**: Status "Pending", "Win", atau "Lose" yang akurat menyesuaikan jam bursa.
+
+### 4. Real-Time AI Status & Force Retrain 🚦
 *   **AI Status**: Indikator di sidebar yang menunjukkan aktivitas mesin secara real-time.
     *   🟢 **Ready / Idle**: Sistem standby.
     *   🟠 **System Busy / Training**: Sistem sedang melatih model di background (Global Awareness).
@@ -112,7 +126,7 @@ Tombol ini berfungsi untuk **meramal harga saham besok** berdasarkan data yang s
 
 ### 4. Metric Dashboard Intelligence 🧠
 *   **Current Price**: Harga penutupan terakhir (Real).
-*   **AI Target**: Prediksi harga penutupan berikutnya.
+*   **AI Target**: Prediksi harga penutupan berikutnya. *Sekarang menggunakan scaler yang disimpan & data makro real-time untuk akurasi maksimal.*
 *   **Win Rate**: Persentase keberhasilan prediksi (Prediksi Arah Benar / Total Trades). *Akan 0% di awal sebelum ada history prediksi.*
 *   **Error Margin**: Rata-rata selisih prediksi dengan harga asli dalam Rupiah (misal: ± Rp 300). Semakin kecil semakin akurat.
 *   **Data Knowledge**: Berapa lama data historis yang dipelajari AI (misal: 10 Tahun). Menunjukkan "kematangan" model.
@@ -129,6 +143,31 @@ Bagian ini menjelaskan status "kesehatan" dan "kecerdasan" model yang sedang akt
 *   **Macro Awareness**: Indikator apakah model mempertimbangkan faktor eksternal.
     *   ✅ **ON**: Model melihat IHSG & Kurs USD saat memprediksi saham (Lebih Pintar).
     *   ❌ **OFF**: Model hanya melihat harga saham itu sendiri (Single-vision).
+
+### 6. Tab "Company Profile" (Bahasa Indonesia) 🏢
+Fitur baru yang menampilkan profil lengkap perusahaan:
+*   **Auto-Translate**: Deskripsi bisnis & sektor otomatis diterjemahkan ke Bahasa Indonesia.
+*   **Business Summary**: Penjelasan model bisnis perusahaan.
+*   **Website**: Link langsung ke situs resmi.
+
+### 7. Tab "Smart Analysis" (Bedah Saham Lengkap) 🧠
+Analisis teknikal mendalam yang dihitung secara otomatis untuk membantu keputusan trading:
+1.  **Likuiditas**: Mengukur apakah saham ini ramai ("Liquid") atau sepi ("Illiquid") berdasarkan rata-rata transaksi harian.
+2.  **Price Action**: Menentukan Tren (Uptrend/Downtrend) dan level Support/Resistance.
+3.  **Volatilitas**: Menggunakan ATR (Average True Range) untuk mengukur risiko pergerakan harga.
+4.  **Psikologi Pasar (RSI)**: Mendeteksi kondisi Fear (Oversold) vs Greed (Overbought).
+5.  **Manajemen Risiko**: Rekomendasi level **Cut Loss** dan **Target Profit** yang objektif (Rasio 1:2).
+
+> **Tujuan:** Memberikan *second opinion* yang berbasis data dan logika, bukan emosi.
+
+### 8. Tab "Trader Checklist" (Scalping Mode) ✅
+Fitur unggulan untuk trader jangka pendek, mengimplementasikan algoritma scoring 100 poin:
+*   **Multi-Timeframe Analysis**: Menggabungkan tren Daily, Hourly, dan 15m.
+*   **Scoring System**:
+    *   🟢 **Score ≥ 75**: LAYAK DITRADE (Kuat).
+    *   🟡 **Score 65-74**: WASPADA (Tunggu konfirmasi).
+    *   🔴 **Score < 65**: TIDAK LAYAK (Hindari).
+*   **Kriteria**: Memeriksa Tren, Volume, Volatilitas, dan Fundamental dasar secara otomatis.
 
 ## 📊 Monitoring & Logs (Continuous Services)
 

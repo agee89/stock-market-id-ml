@@ -7,6 +7,10 @@ from src.utils.database import SessionLocal, get_db
 from src.utils.logger import get_logger
 from src.training.trainer import ModelTrainer
 from src.models.lstm_model import LSTMModel
+from src.data_collection.news_collector import NewsCollector
+from src.inference.live_predictor import LivePredictor
+from src.analysis.checklist import TraderChecklist
+from src.analysis.deepseek_analyst import DeepSeekAnalyst
 import os
 
 app = FastAPI(title="Stock Market ID ML API")
@@ -17,6 +21,8 @@ class PredictionResponse(BaseModel):
     predicted_price: float
     expected_change_pct: float
     model_type: str = "LSTM"
+    current_price_date: Optional[str] = None
+    target_date: Optional[str] = None
 
 class StockResponse(BaseModel):
     symbol: str
@@ -25,6 +31,125 @@ class StockResponse(BaseModel):
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+@app.get("/analysis/{symbol}")
+def get_stock_analysis(symbol: str, interval: str = '1d'):
+    import pandas as pd
+    import numpy as np
+    import ta
+    
+    db = SessionLocal()
+    try:
+        # Fetch sufficient history for indicators (SMA200 needs 200+)
+        query = text("""
+            SELECT timestamp as date, open, high, low, close, volume
+            FROM stock_prices p
+            JOIN stocks s ON s.id = p.stock_id
+            WHERE s.symbol = :symbol AND p.interval = :interval
+            ORDER BY timestamp DESC
+            LIMIT 300
+        """)
+        res = db.execute(query, {"symbol": symbol, "interval": interval}).fetchall()
+        
+        if not res or len(res) < 50:
+            return {"error": "Insufficient data"}
+            
+        df = pd.DataFrame(res, columns=['date', 'open', 'high', 'low', 'close', 'volume']).iloc[::-1] # Sort Asc
+        
+        # Ensure correct types (Decimal -> Float)
+        cols_to_fix = ['open', 'high', 'low', 'close', 'volume']
+        df[cols_to_fix] = df[cols_to_fix].astype(float)
+        
+        # 1. Liquidity & Volatility
+        avg_vol = df['volume'].rolling(20).mean().iloc[-1]
+        last_close = df['close'].iloc[-1]
+        avg_value = avg_vol * last_close # Est. transaction value
+        
+        df['tr'] = np.maximum((df['high'] - df['low']), 
+                             np.maximum(abs(df['high'] - df['close'].shift(1)), 
+                                      abs(df['low'] - df['close'].shift(1))))
+        atr = df['tr'].rolling(14).mean().iloc[-1]
+        
+        volatility_pct = (atr / last_close) * 100
+        
+        # 2. Trend (Price Action)
+        sma_20 = ta.trend.sma_indicator(df['close'], window=20).iloc[-1]
+        sma_50 = ta.trend.sma_indicator(df['close'], window=50).iloc[-1]
+        sma_200 = ta.trend.sma_indicator(df['close'], window=200).iloc[-1] if len(df) > 200 else 0
+        
+        trend = "SIDEWAYS"
+        if last_close > sma_20 > sma_50: trend = "UPTREND (Strong)"
+        elif last_close < sma_20 < sma_50: trend = "DOWNTREND (Strong)"
+        elif last_close > sma_50: trend = "UPTREND (Moderate)"
+        
+        # 3. Psychology (RSI)
+        rsi = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+        psychology = "Neutral"
+        if rsi > 70: psychology = "Greed / Overbought ⚠️"
+        elif rsi < 30: psychology = "Fear / Oversold 🛒"
+        
+        # 4. Support & Resistance (Simple Pivot 20d)
+        support = df['low'].rolling(20).min().iloc[-1]
+        resistance = df['high'].rolling(20).max().iloc[-1]
+        
+        # 5. Risk Management (ATR Based)
+        # Conservative: 2x ATR
+        cut_loss = last_close - (2 * atr)
+        target_profit = last_close + (4 * atr) # 1:2 Ratio
+        
+        return {
+            "price": last_close,
+            "liquidity": {
+                "avg_volume": int(avg_vol),
+                "avg_value_idr": float(avg_value),
+                "status": "Liquid" if avg_value > 1000000000 else "Illiquid (Hati-hati)" # 1M IDR threshold low? adjusting mental model -> 1B IDR usually
+            },
+            "trend": {
+                "status": trend,
+                "sma_50": sma_50,
+                "sma_200": sma_200
+            },
+            "volatility": {
+                "atr": float(atr),
+                "pct": float(volatility_pct),
+                "label": "High" if volatility_pct > 3 else "Low" if volatility_pct < 1 else "Normal"
+            },
+            "psychology": {
+                "rsi": float(rsi),
+                "state": psychology
+            },
+            "setup": {
+                "support": float(support),
+                "resistance": float(resistance),
+                "cut_loss": float(cut_loss),
+                "target": float(target_profit),
+                "rr_ratio": "1:2"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Analysis error: {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+@app.get("/analysis/ai/{symbol}")
+def get_ai_analysis(symbol: str):
+    """Get Top-Down Technical Analysis from DeepSeek AI."""
+    try:
+        analyst = DeepSeekAnalyst()
+        result = analyst.analyze_stock(symbol)
+        
+        if result and result.startswith("Error"):
+             raise HTTPException(status_code=400, detail=result)
+        if result and result.startswith("AI Error"):
+             raise HTTPException(status_code=502, detail=result)
+             
+        return {"symbol": symbol, "analysis": result}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"AI Analysis Failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/company/{symbol}")
 def get_company_profile(symbol: str):
@@ -180,189 +305,26 @@ def get_history(symbol: str, days: int = 365, interval: str = '1d'):
 
 @app.get("/predict/{symbol}", response_model=PredictionResponse)
 def predict(symbol: str, interval: str = '1d'):
-    # This is a simplified prediction using the saved model and latest data from DB
+    """
+    Get live prediction for a stock using the LivePredictor class.
+    """
+    db = SessionLocal()
     try:
-        model_path = f"data/models/{symbol}_{interval}_lstm.h5"
-        if not os.path.exists(model_path):
-             # Fallback to 1d if specific interval model not found? No, user needs to retrain.
-            raise HTTPException(status_code=404, detail=f"Model for {interval} not found. Please train first.")
+        predictor = LivePredictor(db)
+        result = predictor.predict_and_save(symbol, interval)
         
-        # Load latest data
-        db = SessionLocal()
-        # Need last 60 points for sequence
-        query = text("""
-            SELECT p.timestamp, p.close, p.volume, p.open, p.high, p.low
-            FROM stock_prices p
-            JOIN stocks s ON s.id = p.stock_id
-            WHERE s.symbol = :symbol AND p.interval = :interval
-            ORDER BY p.timestamp DESC
-            LIMIT 300
-        """)
-        result = db.execute(query, {"symbol": symbol, "interval": interval}).fetchall()
-        db.close()
-        
-        if len(result) < 60:
-             raise HTTPException(status_code=400, detail="Not enough historical data")
-
-        # Prepare data (Reverse because we fetched DESC)
-        df = pd.DataFrame(result, columns=['date', 'close', 'volume', 'open', 'high', 'low']).iloc[::-1]
-        
-        # Ensure proper types
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df.set_index('date', inplace=True) # TI needs index logic? TI methods operate on columns usually.
-        # But TI.calculate_indicators operates on frame.
-        
-        # --- A. FEATURE ENGINEERING: TECHNICAL INDICATORS ---
-        try:
-            from src.feature_engineering.technical_indicators import TechnicalIndicators
-            # We don't need real DB connection for TI calculation logic, but init requires it.
-            # We already have db session.
-            ti = TechnicalIndicators(db)
-            df = ti.calculate_indicators(df)
-        except Exception as e:
-            logger.error(f"Failed to calculate indicators in API: {e}")
-            raise HTTPException(status_code=500, detail=f"TI Calculation failed: {e}")
-
-        # --- B. FEATURE ENGINEERING: NEWS SENTIMENT ---
-        # Get latest sentiment
-        try:
-            # Similar query to get_news but just get recent average?
-            # Or just fetch top 1 recent.
-            # trainer uses 'date_only' merge.
-            # For real-time predict, we use "Today's" sentiment.
-            sent_query = text("""
-                SELECT sentiment_score FROM news_sentiment 
-                JOIN stocks s ON s.id = news_sentiment.stock_id
-                WHERE s.symbol = :symbol
-                ORDER BY date DESC
-                LIMIT 1
-            """)
-            sent_res = db.execute(sent_query, {"symbol": symbol}).fetchone()
-            sentiment_score = float(sent_res[0]) if sent_res else 0.0
-            
-            df['sentiment_score'] = sentiment_score
-        except:
-            df['sentiment_score'] = 0.0
-
-        # --- C. FEATURE ENGINEERING: MACRO CONTEXT ---
-        try:
-            # Fetch IHSG
-            ihsg_query = text("""
-                SELECT timestamp as date, close as ihsg_close FROM stock_prices 
-                JOIN stocks s ON s.id = stock_prices.stock_id
-                WHERE s.symbol = '^JKSE' AND interval = :interval
-                ORDER BY timestamp DESC LIMIT :lim
-            """)
-            ihsg_data = db.execute(ihsg_query, {"interval": interval, "lim": 60}).fetchall()
-            if ihsg_data:
-                ihsg_df = pd.DataFrame(ihsg_data, columns=['date', 'ihsg_close'])
-                ihsg_df['date'] = pd.to_datetime(ihsg_df['date'])
-                ihsg_df.set_index('date', inplace=True)
-                df = pd.merge(df, ihsg_df, left_index=True, right_index=True, how='left')
-                df['ihsg_close'] = df['ihsg_close'].fillna(method='ffill')
-
-            # Fetch USD
-            usd_query = text("""
-                SELECT timestamp as date, close as usd_close FROM stock_prices 
-                JOIN stocks s ON s.id = stock_prices.stock_id
-                WHERE s.symbol = 'IDR=X' AND interval = :interval
-                ORDER BY timestamp DESC LIMIT :lim
-            """)
-            usd_data = db.execute(usd_query, {"interval": interval, "lim": 60}).fetchall()
-            if usd_data:
-                usd_df = pd.DataFrame(usd_data, columns=['date', 'usd_close'])
-                usd_df['date'] = pd.to_datetime(usd_df['date'])
-                usd_df.set_index('date', inplace=True)
-                df = pd.merge(df, usd_df, left_index=True, right_index=True, how='left')
-                df['usd_close'] = df['usd_close'].fillna(method='ffill')
-
-            # Handle missing macro columns if fetch failed
-            if 'ihsg_close' not in df.columns:
-                df['ihsg_close'] = 0.0
-            if 'usd_close' not in df.columns:
-                df['usd_close'] = 0.0
-
-            df['ihsg_close'].fillna(method='bfill', inplace=True)
-            df['usd_close'].fillna(method='bfill', inplace=True)
-            df.fillna(0, inplace=True)
-
-        except Exception as e:
-            logger.error(f"Failed to merge macro features in API: {e}")
-            df['ihsg_close'] = 0.0
-            df['usd_close'] = 0.0
-
-        # Features used in trainer
-        features = ['close', 'volume', 'open', 'high', 'low', 
-                   'rsi_14', 'macd', 'macd_signal', 
-                   'bb_upper', 'bb_lower', 
-                   'sentiment_score',
-                   'ihsg_close', 'usd_close']
-        
-        # Handle scaling
-        from src.feature_engineering.preprocessing import DataPreprocessor
-        preprocessor = DataPreprocessor(sequence_length=60)
-        
-        # Clean NaNs (created by indicators)
-        # If we have < 60 rows after NaN cleaning? 
-        # Indicators like SMA-200 need 200 rows history!
-        # API only fetched 60 rows! 
-        # CRITICAL: We need to fetch MORE history to calculate indicators properly, then slice the last 60.
-        # Logic update needed in SQL query above.
-        
-        # Re-fetch with lookback
-        # 60 (seq) + 200 (max indicator window) = 260
-        # Let's fetch 300 to be safe.
-        
-        # ... Wait, I cannot re-fetch here easily inside this block without refactoring.
-        # I must fix the FETCH query first.
-        
-        # Temporary logic: Fill NaNs with 0 or ffill? 
-        # ffill is safer. bfill for start.
-        df.fillna(method='bfill', inplace=True)
-        df.fillna(method='ffill', inplace=True)
-        df.fillna(0, inplace=True) # Last resort
-        
-        # Fit on this window (MVP Hack - ideally load saved scalers)
-        # Using fit_transform on just 60 rows is BAD because scale will be different from training!
-        # Ideally we should load the scaler saved during training.
-        # But we didn't save the scaler! (Typical MVP issue).
-        # Compromise: fit_transform on the 300 rows window is "better" but still drifting.
-        # For now, stick with fit_transform on available data.
-        
-        scaled_df = preprocessor.fit_transform(df, features)
-        
-        # Create sequence (last 60)
-        if len(scaled_df) < 60:
-             raise HTTPException(status_code=400, detail="Not enough data after processing")
+        if not result:
+             # Check if model exists first? LivePredictor logs error if stock not found or model missing.
+             # We can assume 404/500 based on logs, but generic 404 here
+             raise HTTPException(status_code=404, detail=f"Prediction failed. Ensure model is trained for {symbol} {interval}.")
              
-        X = scaled_df[features].values[-60:].reshape(1, 60, len(features))
-        
-        # Predict
-        model = LSTMModel.load(model_path)
-        pred_scaled = model.predict(X)
-        
-        # Inverse transform logic
-        # We need to unscale. 
-        # Using the same MinMax logic on the specific column 'close'
-        close_min = float(df['close'].min())
-        close_max = float(df['close'].max())
-        pred_price = float(pred_scaled[0][0]) * (close_max - close_min) + close_min
-        
-        # Calculate expected change percentage
-        # df is sorted ASCENDING (Oldest -> Newest) due to .iloc[::-1] above.
-        # So we want the LATEST close, which is at [-1]
-        current_close = float(df['close'].iloc[-1]) 
-        expected_change_pct = ((pred_price - current_close) / current_close) * 100
-
         return {
             "symbol": symbol,
-            "predicted_price": float(pred_price),
-            "expected_change_pct": float(expected_change_pct),
-            "model_type": f"LSTM ({interval})"
+            "predicted_price": result['predicted_price'],
+            "expected_change_pct": result['expected_change_pct'],
+            "model_type": f"LSTM ({interval})",
+            "current_price_date": result['prediction_date'].strftime("%Y-%m-%d %H:%M"),
+            "target_date": result['target_date'].strftime("%Y-%m-%d %H:%M")
         }
 
     except HTTPException as he:
@@ -522,7 +484,7 @@ def get_signals(symbol: str, limit: int = 100, interval: str = '1d', start_date:
                 "predicted_pct": float(row[3] or 0),
                 "actual": row[4],
                 "actual_pct": float(row[5] or 0),
-                "is_win": bool(row[6]),
+                "is_win": bool(row[6]) if row[6] is not None else None,
                 "predicted_price": float(row[7]) if row[7] else None,
                 "actual_price": float(row[8]) if row[8] else None,
                 "interval": interval
@@ -588,5 +550,97 @@ def get_winrate(symbol: str, interval: str = '1d', start_date: Optional[str] = N
     except Exception as e:
         logger.error(f"Error fetching winrate: {e}")
         return {"win_rate": 0.0, "total_trades": 0, "wins": 0}
+    finally:
+        db.close()
+
+@app.get("/checklist/{symbol}")
+def get_checklist(symbol: str):
+    try:
+        # Instantiate and calculate
+        checklist = TraderChecklist(symbol)
+        result = checklist.calculate()
+        return result
+    except Exception as e:
+        logger.error(f"Checklist error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ScanRequest(BaseModel):
+    symbols: Optional[List[str]] = []
+
+@app.post("/scan")
+def scan_market(req: ScanRequest):
+    import concurrent.futures
+    
+    # Default Universe if empty
+    targets = req.symbols
+    if not targets or len(targets) == 0:
+        targets = [
+            'BBCA.JK', 'BBRI.JK', 'BMRI.JK', 'BBNI.JK', 'TLKM.JK', 
+            'ASII.JK', 'GOTO.JK', 'ANTM.JK', 'MDKA.JK', 'UNTR.JK', 
+            'ADRO.JK', 'PTBA.JK', 'PGAS.JK', 'INCO.JK', 'BRPT.JK', 
+            'AMMN.JK', 'MEDC.JK', 'HRUM.JK', 'TPIA.JK', 'AKRA.JK',
+            'SRTG.JK', 'BUKA.JK', 'EMTK.JK', 'ARTO.JK', 'CPIN.JK',
+            'ICBP.JK', 'INDF.JK', 'KLBF.JK', 'UNVR.JK', 'EXCL.JK'
+        ]
+        
+    results = []
+    
+    def process_one(sym):
+        try:
+            # Re-use existing checklist logic for freshness
+            chk = TraderChecklist(sym)
+            res = chk.calculate()
+            return res
+        except Exception as e:
+            return {"symbol": sym, "error": str(e)}
+
+    # Run in parallel to speed up 20+ http requests
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_one, sym): sym for sym in targets}
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            results.append(res)
+            
+    # Sort by total_score descending
+    results.sort(key=lambda x: x.get('total_score', -1), reverse=True)
+            
+    return results
+@app.delete("/stocks/{symbol}")
+def delete_stock(symbol: str):
+    db = SessionLocal()
+    try:
+        # Find Stock ID
+        sid = db.execute(text("SELECT id FROM stocks WHERE symbol = :s"), {"s": symbol}).fetchone()
+        if not sid:
+            raise HTTPException(status_code=404, detail="Stock not found")
+        stock_id = sid[0]
+        
+        # 1. Prediction Results (via Predictions)
+        db.execute(text("DELETE FROM prediction_results WHERE prediction_id IN (SELECT id FROM predictions WHERE stock_id = :sid)"), {"sid": stock_id})
+        
+        # 2. Predictions
+        db.execute(text("DELETE FROM predictions WHERE stock_id = :sid"), {"sid": stock_id})
+        
+        # 3. Model Performance (ByName)
+        db.execute(text("DELETE FROM model_performance WHERE model_name LIKE :pat"), {"pat": f"%{symbol}%"})
+        db.execute(text("DELETE FROM model_metadata WHERE model_name LIKE :pat"), {"pat": f"%{symbol}%"})
+        
+        # 4. News
+        db.execute(text("DELETE FROM news_sentiment WHERE stock_id = :sid"), {"sid": stock_id})
+        
+        # 5. Prices
+        db.execute(text("DELETE FROM stock_prices WHERE stock_id = :sid"), {"sid": stock_id})
+        
+        # 6. Stock
+        db.execute(text("DELETE FROM stocks WHERE id = :sid"), {"sid": stock_id})
+        
+        db.commit()
+        logger.info(f"Deleted stock {symbol} and all associated data.")
+        return {"message": f"Deleted {symbol} successfully"}
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete stock {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()

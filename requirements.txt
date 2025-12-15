@@ -24,8 +24,12 @@ newspaper3k==0.2.8
 feedparser==6.0.10
 deep-translator==1.11.4
 
+
 # Technical Indicators
 ta==0.11.0
+
+# LLM Integration
+openai>=1.0.0
 
 
 # Database

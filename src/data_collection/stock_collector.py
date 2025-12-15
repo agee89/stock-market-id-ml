@@ -7,6 +7,7 @@ import time
 from src.utils.database import SessionLocal, get_db
 from src.utils.logger import get_logger
 from src.utils.config import get_settings
+from src.inference.live_predictor import LivePredictor
 
 logger = get_logger()
 settings = get_settings()
@@ -14,7 +15,10 @@ settings = get_settings()
 class StockCollector:
     def __init__(self, db: Session):
         self.db = db
-        self.symbols = settings.DEFAULT_STOCKS.split(",")
+        # self.symbols = settings.DEFAULT_STOCKS.split(",")
+        # User requested NO defaults. Only stocks added via UI should exist.
+        self.symbols = []
+        self.predictor = LivePredictor(db)
 
     def update_stock_list_in_db(self):
         """Ensure all default stocks exist in the database."""
@@ -134,46 +138,153 @@ class StockCollector:
                 )
                 self.db.commit()
                 logger.info(f"Successfully updated {count} {interval} records for {symbol}")
+                return count
             else:
                 logger.warning(f"No data to insert for {symbol}")
+                return 0
 
         except Exception as e:
             logger.error(f"Failed to fetch/save history for {symbol}: {e}")
             self.db.rollback()
+        return 0
 
     def run_daily_update(self):
-        """Run daily update for all stocks in the Database."""
-        # 1. Seed: Ensure default stocks from .env are in DB
+        """Perform daily closing tasks: Update stock list, 1d history, and final intraday sweep."""
+        logger.info("🌅 Running Daily Update Sequence...")
+        
+        # 1. Update Stock List
         self.update_stock_list_in_db()
         
-        # 2. Fetch ALL stocks from DB (Source of Truth) to include dynamically added ones
+        # 2. Final Intraday Sweep (Catch 16:00 closes)
+        logger.info("🧹 Performing Final Intraday Sweep...")
+        self.run_intraday_update(intervals=['15m', '1h'])
+        
+        # 3. Update Daily Data (1d)
+        res = self.db.execute(text("SELECT symbol FROM stocks"))
+        all_symbols = [row[0] for row in res.fetchall()]
+        
+        for symbol in all_symbols:
+            try:
+                # Fetch 1d history (complete)
+                self.fetch_history(symbol, days=365, interval='1d')
+                # Predict 1d
+                self.predictor.predict_and_save(symbol, '1d')
+            except Exception as e:
+                logger.error(f"Daily Update Error {symbol}: {e}")
+                
+        logger.info("✅ Daily Update Sequence Completed.")
+
+    def process_intraday_single(self, symbol, intervals=['15m', '1h']):
+        """Helper to process a single symbol for intraday update (Fetch + Predict)."""
+        for interval in intervals:
+            try:
+                # 1m needs less history (max 5 days is OK, but 1 day is faster? kept 5 for safety)
+                days = 5 if interval != '1m' else 2 
+                c = self.fetch_history(symbol, days=days, interval=interval)
+                if c > 0:
+                    self.predictor.predict_and_save(symbol, interval)
+            except Exception as e:
+                logger.error(f"Error {interval} {symbol}: {e}")
+
+    def run_intraday_update(self, intervals=['15m', '1h']):
+        """Run quick update for intraday data during market hours."""
+        import concurrent.futures
+
+        # Fetch ALL stocks
         try:
             res = self.db.execute(text("SELECT symbol FROM stocks"))
             all_symbols = [row[0] for row in res.fetchall()]
-        except Exception as e:
-            logger.error(f"Failed to fetch stock list from DB: {e}")
-            all_symbols = self.symbols # Fallback to env list
-            
-        logger.info(f"Starting Daily Update for {len(all_symbols)} stocks: {all_symbols}")
+        except:
+             all_symbols = self.symbols
 
-        for symbol in all_symbols:
-            logger.info(f"Processing {symbol}...")
-            self.fetch_history(symbol, days=settings.LOOKBACK_DAYS)
-            time.sleep(1) # Be nice to API
+        logger.info(f"⚡ Starting Intraday Update {intervals} for {len(all_symbols)} stocks...")
+        
+        def process_symbol_safe(symbol):
+            # Create ISOLATED session for this thread
+            thread_db = SessionLocal()
+            worker = StockCollector(thread_db)
+            try:
+                worker.process_intraday_single(symbol, intervals)
+            except Exception as e:
+                logger.error(f"Thread Safe Wrapper Error {symbol}: {e}")
+            finally:
+                thread_db.close()
+
+        # Use ThreadPool to speed up
+        # max_workers=5 is safe for YFinance to avoid rate limits
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            executor.map(process_symbol_safe, all_symbols)
+                
+        logger.info("⚡ Intraday Update Completed.")
 
 if __name__ == "__main__":
     db = SessionLocal()
     collector = StockCollector(db)
     
-    logger.info("Starting Stock Collector Service (Continuous Mode)...")
+    logger.info("Starting Stock Collector Service (Smart Mode)...")
+    
+    # Run once on startup to ensure data
+    logger.info("Startup Check...")
+    collector.update_stock_list_in_db()
+    
+    import pytz
+    jakarta_tz = pytz.timezone('Asia/Jakarta')
     
     while True:
         try:
-            logger.info("--- Starting Daily Update Cycle ---")
-            collector.run_daily_update()
-            logger.info("--- Cycle Completed. Sleeping for 12 Hours... ---")
+            now_wib = datetime.now(jakarta_tz)
+            current_hour = now_wib.hour
+            current_min = now_wib.minute
+            current_day = now_wib.weekday() # 0=Mon, 6=Sun
+            
+            # Weekend Check
+            if current_day >= 5: # Sat, Sun
+                 logger.info("Weekend. Sleeping...")
+                 time.sleep(3600)
+                 continue
+
+            # Daily Update Time (e.g., 17:00 WIB after market close)
+            # We check if it's past 17:00 and we haven't run today (logic simplified for loop)
+            # Simply: if it is the 17th hour, run daily once then sleep long
+            if current_hour == 17:
+                logger.info("--- Starting Daily Closing Update ---")
+                collector.run_daily_update()
+                logger.info("Daily Update Done. Sleeping till tomorrow...")
+                time.sleep(10 * 3600) # Sleep 10 hours
+                continue
+                
+            # Intraday Market Hours (09:00 - 16:00 WIB)
+            # Logic: Run every minute for 1m data.
+            # Run specific logic for 15m/1h updates on :11, :26, :41, :56.
+            
+            if 8 <= current_hour <= 16:
+                # Define 15m trigger minutes (Delayed by 11 mins for safety)
+                TRIGGER_15M = [11, 26, 41, 56]
+                
+                intervals_to_run = ['1m'] # Always run 1m
+                
+                # Check if we should also run 15m/1h
+                if current_min in TRIGGER_15M:
+                    intervals_to_run.extend(['15m', '1h'])
+                    logger.info(f"🕒 Major Update Cycle: {intervals_to_run}")
+                else:
+                    logger.info(f"🚀 Turbo Update Cycle (1m only)")
+
+                # Execute
+                collector.run_intraday_update(intervals=intervals_to_run)
+                
+                # Sleep smart until next minute start + 5 seconds
+                # This ensures we hit every minute exactly once
+                now_check = datetime.now(jakarta_tz)
+                sleep_sec = 60 - now_check.second + 5
+                logger.info(f"💤 Sleeping {sleep_sec}s until next minute...")
+                time.sleep(sleep_sec)
+                
+            else:
+                 # Outside active hours
+                 logger.info("Market Closed. Waiting...")
+                 time.sleep(3600)
+
         except Exception as e:
             logger.error(f"Critical Error in Collector Loop: {e}")
-        
-        # Sleep for 12 hours (43200 seconds)
-        time.sleep(43200)
+            time.sleep(60)
