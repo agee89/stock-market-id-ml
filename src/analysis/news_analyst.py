@@ -13,12 +13,23 @@ class DeepSeekNewsAnalyst:
     Uses DeepSeek AI to convert text headlines into numerical sentiment scores.
     """
     def __init__(self):
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
+        # 1. Robust .env loading
+        from pathlib import Path
+        env_path = Path(__file__).parent.parent.parent / '.env'
+        load_dotenv(dotenv_path=env_path)
+
+        self.api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = "https://api.deepseek.com"
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        
+        if not self.api_key:
+            logger.warning("⚠️ DEEPSEEK_API_KEY not found. News Analysis will return Neutral (0.0).")
+            self.client = None
+        else:
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url
+            )
+            
         # Dedicated System Prompt for News Scoring
         self.system_prompt = (
             "You are a Quantitative Financial Sentiment Analyzer Agent.\n"
@@ -34,6 +45,9 @@ class DeepSeekNewsAnalyst:
         """
         if not headlines:
             return 0.0
+
+        if not self.client:
+            return 0.0 # Neural/Fallback if no API Key
             
         try:
             headlines_str = "\n".join([f"- {h}" for h in headlines])

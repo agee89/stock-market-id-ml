@@ -42,6 +42,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - REDIS_HOST=redis
       - TZ=Asia/Jakarta
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
     volumes:
       - ./data:/app/data
       - ./src:/app/src
@@ -67,6 +68,7 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - TZ=Asia/Jakarta
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
     volumes:
       - ./data:/app/data
       - ./src:/app/src
@@ -120,11 +122,12 @@ services:
       - "8505:8501"
     volumes:
       - ./src/dashboard:/app/dashboard
+      - ./logs:/app/logs
     depends_on:
       - api
     networks:
       - stock_ml_network
-    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    command: streamlit run dashboard/0_🏠_Dashboard.py --server.port 8501 --server.address 0.0.0.0
 
 volumes:
   postgres_data:

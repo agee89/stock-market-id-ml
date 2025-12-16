@@ -117,85 +117,51 @@ Tracking kinerja trading yang lebih transparan dan bersih.
 *   **AI Status**: Indikator di sidebar yang menunjukkan aktivitas mesin secara real-time.
     *   🟢 **Ready / Idle**: Sistem standby.
     *   🟠 **System Busy / Training**: Sistem sedang melatih model di background (Global Awareness).
-*   **Force Retrain**: Tombol untuk memaksa pelatihan *saat ini juga* (Instant). Gunakan ini jika baru saja menambah saham baru dan ingin melihat hasilnya segera tanpa menunggu antrian otomatis.
-
-### 3. Tombol "Generate Prediction" 🔮
-Tombol ini berfungsi untuk **meramal harga saham besok** berdasarkan data yang sudah dipelajari model.
-*   **Cara Kerja**: Sistem mengambil 60 hari data terakhir dari database, lalu meminta model LSTM (yang sudah disimpan) untuk memprediksi 1 langkah ke depan.
-*   **Kapan dipakai**: Saat Anda ingin tahu perkiraan harga penutupan (Close Price) untuk hari berikutnya.
-
-### 4. Metric Dashboard Intelligence 🧠
-*   **Current Price**: Harga penutupan terakhir (Real).
-*   **AI Target**: Prediksi harga penutupan berikutnya. *Sekarang menggunakan scaler yang disimpan & data makro real-time untuk akurasi maksimal.*
-*   **Win Rate**: Persentase keberhasilan prediksi (Prediksi Arah Benar / Total Trades). *Akan 0% di awal sebelum ada history prediksi.*
-*   **Error Margin**: Rata-rata selisih prediksi dengan harga asli dalam Rupiah (misal: ± Rp 300). Semakin kecil semakin akurat.
-*   **Data Knowledge**: Berapa lama data historis yang dipelajari AI (misal: 10 Tahun). Menunjukkan "kematangan" model.
+*   **Force Retrain**: Tombol untuk memaksa pelatihan *saat ini juga* (Instant). 
+*   **Mass Retrain All**: Tombol khusus untuk melatih ulang SELURUH model (Daily, Hourly, 15m) secara massal. Berguna untuk sinkronisasi total setelah penambahan fitur baru (seperti Macro Economics).
 
 ### 5. Penjelasan Metadata AI (Brain Details) 🧠
 Bagian ini menjelaskan status "kesehatan" dan "kecerdasan" model yang sedang aktif:
-
 *   **Data Maturity**: Indikator jumlah data latih.
-    *   🔴 **Low (Early Stage)**: Data < 4 Tahun. Kurang stabil.
-    *   🟠 **Medium (Developing)**: Data 4-8 Tahun. Cukup baik.
-    *   🟢 **High (Mature)**: Data > 8 Tahun. Sangat stabil dan mengenali siklus pasar panjang.
-*   **Training Date**: Waktu terakhir kali model dilatih ulang (Retrain).
-*   **Model Version**: Versi arsitektur model (Misal: `v1`). Digunakan untuk tracking eksperimen.
-*   **Macro Awareness**: Indikator apakah model mempertimbangkan faktor eksternal.
-    *   ✅ **ON**: Model melihat IHSG & Kurs USD saat memprediksi saham (Lebih Pintar).
-    *   ❌ **OFF**: Model hanya melihat harga saham itu sendiri (Single-vision).
+    *   🔴 **Low**: Data < 4 Tahun. 
+    *   🟢 **High**: Data > 8 Tahun.
+*   **Macro Awareness**: Indikator apakah model mempertimbangkan IHSG & Kurs USD (✅ ON).
 
 ### 6. Tab "Company Profile" (Bahasa Indonesia) 🏢
-Fitur baru yang menampilkan profil lengkap perusahaan:
-*   **Auto-Translate**: Deskripsi bisnis & sektor otomatis diterjemahkan ke Bahasa Indonesia.
-*   **Business Summary**: Penjelasan model bisnis perusahaan.
-*   **Website**: Link langsung ke situs resmi.
+Fitur baru yang menampilkan profil lengkap perusahaan (Auto-Translate).
 
 ### 7. Tab "Smart Analysis" (Bedah Saham Lengkap) 🧠
-Analisis teknikal mendalam yang dihitung secara otomatis untuk membantu keputusan trading:
-1.  **Likuiditas**: Mengukur apakah saham ini ramai ("Liquid") atau sepi ("Illiquid") berdasarkan rata-rata transaksi harian.
-2.  **Price Action**: Menentukan Tren (Uptrend/Downtrend) dan level Support/Resistance.
-3.  **Volatilitas**: Menggunakan ATR (Average True Range) untuk mengukur risiko pergerakan harga.
-4.  **Psikologi Pasar (RSI)**: Mendeteksi kondisi Fear (Oversold) vs Greed (Overbought).
-5.  **Manajemen Risiko**: Rekomendasi level **Cut Loss** dan **Target Profit** yang objektif (Rasio 1:2).
-
-> **Tujuan:** Memberikan *second opinion* yang berbasis data dan logika, bukan emosi.
+Analisis teknikal mendalam: Likuiditas, Price Action, Volatilitas (ATR), Psikologi (RSI), dan Manajemen Risiko (Cut Loss/TP).
 
 ### 8. Tab "Trader Checklist" (Scalping Mode) ✅
-Fitur unggulan untuk trader jangka pendek, mengimplementasikan algoritma scoring 100 poin:
-*   **Multi-Timeframe Analysis**: Menggabungkan tren Daily, Hourly, dan 15m.
-*   **Scoring System**:
-    *   🟢 **Score ≥ 75**: LAYAK DITRADE (Kuat).
-    *   🟡 **Score 65-74**: WASPADA (Tunggu konfirmasi).
-    *   🔴 **Score < 65**: TIDAK LAYAK (Hindari).
-*   **Kriteria**: Memeriksa Tren, Volume, Volatilitas, dan Fundamental dasar secara otomatis.
+Fitur unggulan untuk trader jangka pendek, mengimplementasikan algoritma scoring 100 poin (Tren, Volume, Volatilitas).
 
 ### 9. AI Call To Action (Banner Signal) 📢
-Fitur instruksi instan yang muncul paling atas di Dashboard:
-*   **Instruksi Jelas**: Kotak Hijau (**BELI**) atau Merah (**JUAL/HINDARI**).
-*   **Target Harga**: Menampilkan harga tujuan spesifik dan persentase potensi profit.
-*   **Waktu Target**: Estimasi kapan harga target tercapai.
-*   **Logika**: Menggunakan ambang batas (*threshold*) dari prediksi AI untuk memberikan perintah eksekusi yang tegas.
+Fitur instruksi instan (BELI/JUAL) dengan Target Harga dan Waktu estimasi.
 
 ### 10. News & Sentiment (DeepSeek AI) 📰
-Tab khusus untuk analisis sentimen berita berbasis AI:
-*   **DeepSeek Engine**: Menggunakan LLM DeepSeek untuk "membaca" judul berita secara kontekstual, bukan sekadar keyword matching.
-*   **Scoring -1 hingga +1**: AI memberikan nilai kuantitatif pada setiap berita.
-    *   **+1.0**: Sangat Bagus (Greed).
-    *   **-1.0**: Sangat Buruk (Fear).
-*   **Hourly Update**: Berita diperbarui setiap jam sesuai jam bursa.
+Tab khusus untuk analisis sentimen berita berbasis AI (DeepSeek & OpenAI Fallback).
+*   **DeepSeek Engine**: Membaca konteks berita.
+*   **Scoring**: +1 (Greed) s.d -1 (Fear).
 
 ## 📘 Best Practice & Strategi
 Untuk panduan penggunaan strategi trading yang efektif (Timeframe, Entry, Cutloss), silakan baca dokumen terpisah:
 👉 **[BACA PANDUAN BEST PRACTICE DI SINI](bestpractice.md)**
 
+### 11. System Logs & Diagnostics 📝
+Halaman khusus untuk memantau kesehatan sistem tanpa membuka terminal:
+*   **Live Viewer**: Melihat log backend (`app.log`) secara real-time dari Dashboard.
+*   **Filter & Search**: Cari error spesifik (misal: "Mismatch", "API Key").
+*   **Auto-Refresh**: Log selalu diperbarui untuk deteksi masalah instan.
+
 ## 📊 Monitoring & Logs (Continuous Services)
 
-Sistem ini didesain untuk berjalan **Non-Stop (24/7)**.
+Sistem ini didesain untuk berjalan **Non-Stop (24/7)** dengan mekanisme *Self-Healing* (Auto-Slice Input jika fitur mismatch).
 *   **Data Collector**: Otomatis bangun setiap 12 jam untuk cek data baru.
 *   **ML Trainer**: Otomatis cek antrian pelatihan model setiap 1 jam.
 *   **Dashboard**: Menampilkan status real-time sistem.
 
-Anda bisa memantau aktivitas setiap komponen secara real-time menggunakan perintah berikut di terminal:
+Anda bisa memantau aktivitas setiap komponen secara real-time menggunakan menu **System Logs** di Dashboard, atau terminal:
 
 | Komponen | Kegunaan | Perintah Log |
 | :--- | :--- | :--- |

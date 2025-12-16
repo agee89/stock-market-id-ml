@@ -14,6 +14,12 @@ st.caption("Scan top liquid stocks using Trader Checklist criteria.")
 with st.sidebar:
     st.header("Scanner Settings")
     custom_symbols = st.text_area("Custom Symbols (Optional)", placeholder="BBCA.JK, ANTM.JK...")
+    
+    st.divider()
+    st.header("🎯 ML Criteria")
+    st.caption("Filter stocks suitable for AI Training:")
+    min_ml_score = st.slider("Min ML Score", 0, 100, 60)
+    
     # Manual Trigger
     if st.button("🚀 Re-Scan Market"):
         st.session_state['scan_results'] = None
@@ -51,6 +57,7 @@ if scan_btn:
                     if "error" in item: continue
                     
                     scores = item.get('scores', {})
+                    metrics = item.get('metrics', {}) # New Metrics
                     details = item.get('details', {})
                     
                     # Extract key info
@@ -59,17 +66,19 @@ if scan_btn:
                     rows.append({
                         "Symbol": item['symbol'],
                         "Score": item['total_score'],
+                        "ML Score": scores.get('ml_suitability', 0), # New Column
                         "Decision": item['decision'],
-                        "Daily": scores.get('daily', 0),
-                        "Hourly": scores.get('hourly', 0),
-                        "15m": scores.get('15m', 0),
-                        "Vol": scores.get('volume', 0),
-                        "Fund": scores.get('fundamental', 0),
-                        "Liquid": "✅" if vol_liquid else "❌",
+                        "Rec": metrics.get('recommendation', 'N/A'), # New Column
+                        "Liquid": f"Rp {metrics.get('avg_value_idr', 0)/1E9:.1f} M", # New Column
+                        "Vol": f"{metrics.get('volatility_pct', 0):.1f}%", # New Column
                         "Action": item['symbol'] # Placeholder for button
                     })
                     
                 df = pd.DataFrame(rows)
+                
+                # Sort by ML Score by default
+                df = df.sort_values(by="ML Score", ascending=False)
+                
                 st.session_state['scan_results'] = df
             else:
                 st.error(f"Scan failed: {response.text}")
@@ -100,24 +109,34 @@ if st.session_state['scan_results'] is not None:
     except:
         pass # Ignore error, just assume empty
 
+    # Filter by Slider
+    df = df[df['ML Score'] >= min_ml_score]
+
     for index, row in df.iterrows():
         with st.container():
-            c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 3, 1, 1, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([1.5, 1, 2, 1.5, 1.5, 1])
             c1.markdown(f"**{row['Symbol']}**")
-            c1.caption(row['Liquid'])
+            c1.caption(f"Vol: {row['Vol']}")
             
+            # Score Color
             score_color = "green" if row['Score'] >= 75 else "orange" if row['Score'] >= 50 else "red"
-            c2.markdown(f":{score_color}[**{row['Score']}**]")
+            c2.markdown(f"**{row['Score']}**")
+            c2.caption("Tech Score")
             
+            # Decision
             if "TIDAK LAYAK" in row['Decision']:
                 c3.error(row['Decision'], icon="🚫")
             elif "Daily Bearish" in row['Decision']:
                     c3.error(row['Decision'], icon="⚠️")
             else:
                 c3.success(row['Decision'], icon="✅")
-                
-            # Breakdown
-            c4.caption(f"D:{row['Daily']} H:{row['Hourly']} M:{row['15m']}")
+            c3.caption(f"Liquidity: {row['Liquid']}")
+
+            # ML Recommendation
+            ml_score = row['ML Score']
+            ml_color = "green" if ml_score >= 80 else "blue" if ml_score >= 60 else "orange" if ml_score >= 40 else "red"
+            c4.markdown(f":{ml_color}[**{row['Rec']}**]")
+            c4.progress(min(100, int(ml_score)), text=f"ML Score: {ml_score}")
             
             # Button Logic
             sym = row['Symbol']
@@ -129,9 +148,6 @@ if st.session_state['scan_results'] is not None:
                         add_res = requests.post(f"{API_URL}/stocks", json={"symbol": sym})
                         if add_res.status_code == 200:
                             st.toast(f"✅ Added {sym} to Database!")
-                            # Force reload next time to update 'tracked' status?
-                            # For simple UX, just let toast show success.
-                            # Ideally we update existing_symbols locally but streamlit rerun cleans it.
                             st.rerun() 
                         else:
                             st.toast(f"❌ Failed: {add_res.text}")

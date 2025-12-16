@@ -12,11 +12,18 @@ class TraderChecklist:
         }
         self.max_scores = {
             "daily": 25, "hourly": 25, "15m": 20,
-            "volume": 15, "catalyst": 10, "fundamental": 5
+            "volume": 15, "catalyst": 10, "fundamental": 5,
+            "ml_suitability": 100 # New Metric
         }
         self.details = {
             "daily": [], "hourly": [], "15m": [],
-            "volume": [], "catalyst": [], "fundamental": []
+            "volume": [], "catalyst": [], "fundamental": [],
+            "ml_metrics": [] # New Details
+        }
+        self.metrics = {
+             "avg_value_idr": 0,
+             "volatility_pct": 0,
+             "recommendation": "N/A"
         }
         self.data = {}
         self.info = {}
@@ -228,31 +235,86 @@ class TraderChecklist:
         if df is None: return
         
         last_close = df['Close'].iloc[-1]
-        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
-        avg_val = avg_vol * last_close
         
-        # 1. Active Volume / Value > 1B (6 pts)
-        # "Average Volume aktif"
-        if avg_val > 1_000_000_000: # 1 Billion IDR
+        # 1. Avg Value Transaction > 1B (6 pts)
+        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
+        avg_value_idr = avg_vol * last_close
+        if pd.isna(avg_value_idr): avg_value_idr = 0
+        
+        self.metrics['avg_value_idr'] = avg_value_idr # Store for ML Calc
+        
+        if avg_value_idr >= 1_000_000_000:
              self.scores['volume'] += 6
-             self.details['volume'].append({"label": "Liquidity > 1B", "score": 6, "status": "PASS", "value": f"{avg_val/1E9:.1f}B"})
+             self.details['volume'].append({"label": "Liquidity > 1B", "score": 6, "status": "PASS", "value": f"{avg_value_idr/1E9:.1f}B"})
         else:
-             self.details['volume'].append({"label": "Liquidity > 1B", "score": 0, "status": "FAIL", "value": f"{avg_val/1E9:.1f}B"})
+             self.details['volume'].append({"label": "Liquidity > 1B", "score": 0, "status": "FAIL", "value": f"{avg_value_idr/1E9:.1f}B"})
              
         # 2. Vol Intraday > Avg (6 pts)
-        # Check Today's volume vs Avg
-        curr_vol = df['Volume'].iloc[-1]
-        if curr_vol > avg_vol:
-             self.scores['volume'] += 6
-             self.details['volume'].append({"label": "Vol > Avg Vol", "score": 6, "status": "PASS"})
+        vol = df['Volume'].iloc[-1]
+        vol_ma = df['Volume'].rolling(20).mean().iloc[-1]
+        if vol > vol_ma:
+            self.scores['volume'] += 6
+            self.details['volume'].append({"label": "Vol > MA20", "score": 6, "status": "PASS"})
         else:
-             self.details['volume'].append({"label": "Vol > Avg Vol", "score": 0, "status": "FAIL"})
+            self.details['volume'].append({"label": "Vol > MA20", "score": 0, "status": "FAIL"})
+
+        # --- ML SUITABILITY CALCULATION ---
+        # 1. Liquidity (Must be > 10B IDR for Institutions, > 1B for Retail)
+        # avg_value_idr already calc above
+        
+        # 2. Volatility (ATR %)
+        # AI works best on 1.5% - 5% daily range. Too low = Dead. Too high = Gambling.
+        atr = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14).iloc[-1]
+        atr_pct = (atr / last_close) * 100
+        self.metrics['volatility_pct'] = atr_pct
+        
+        ml_score = 0
+        reasons = []
+        
+        # Liquidity Check (Max 50)
+        if avg_value_idr > 100_000_000_000: # > 100 Milyar (Blue Chip)
+            ml_score += 50
+            reasons.append("Ultra Liquid (Big Money)")
+        elif avg_value_idr > 10_000_000_000: # > 10 Milyar (Liquid)
+            ml_score += 40
+            reasons.append("High Liquidity")
+        elif avg_value_idr > 1_000_000_000: # > 1 Milyar (Mid)
+            ml_score += 20
+            reasons.append("Medium Liquidity")
+        else:
+            ml_score -= 50 # Penalty for illiquid
+            reasons.append("Illiquid (Risky)")
+            
+        # Volatility Check (Max 50)
+        if 1.5 <= atr_pct <= 6.0:
+            ml_score += 50
+            reasons.append("Healthy Volatility (Good for AI)")
+        elif atr_pct > 6.0:
+            ml_score += 30
+            reasons.append("High Volatility (Hard/Risky)")
+        elif atr_pct < 1.0:
+            ml_score -= 20
+            reasons.append("Low Volatility (Dead Stock)")
+        else:
+            ml_score += 20 # Default for other cases
+            
+        self.scores['ml_suitability'] = max(0, min(100, ml_score))
+        self.max_scores['ml_suitability'] = 100 # Add max score for ML
+        
+        # Label
+        if ml_score >= 80: rec = "⭐ PERFECT"
+        elif ml_score >= 60: rec = "✅ GOOD"
+        elif ml_score >= 40: rec = "⚠️ RISKY"
+        else: rec = "🚫 AVOID"
+        
+        self.metrics['recommendation'] = rec
+        self.details['ml_metrics'] = reasons
              
         # 3. Spread Wajar (3 pts)
         # Hard to get Real Spread from free API.
         # Proxy: High-Low range is decent (not 0) and not crazy wicks.
         # Assume Pass for now if liquid.
-        if avg_val > 5_000_000_000:
+        if avg_value_idr > 5_000_000_000:
              self.scores['volume'] += 3
              self.details['volume'].append({"label": "Spread (Est.)", "score": 3, "status": "PASS", "value": "Liquid"})
         else:
@@ -264,7 +326,6 @@ class TraderChecklist:
         try:
             # yfinance info keys: 'trailingEps', 'totalRevenue' (just existence?), 'revenueGrowth', 'earningsGrowth'
             eps = self.info.get('trailingEps', 0)
-            rev_growth = self.info.get('revenueGrowth', 0)
             
             if eps > 0:
                 self.scores['fundamental'] += 3
@@ -312,13 +373,16 @@ class TraderChecklist:
         self.analyze_fundamental()
         self.analyze_catalyst()
         
-        total_score = sum(self.scores.values())
+        # Calculate Total Score (Excluding ML Suitability from the Trade Checklist 0-100)
+        # We only sum the keys that are part of the original checklist
+        checklist_keys = ['daily', 'hourly', '15m', 'volume', 'catalyst', 'fundamental']
+        final_score = sum(self.scores.get(k, 0) for k in checklist_keys)
         
         # Decision
         decision = "🔴 TIDAK LAYAK"
-        if total_score >= 75:
+        if final_score >= 75:
             decision = "🟢 LAYAK DITRADE (KUAT)"
-        elif total_score >= 65:
+        elif final_score >= 65:
             decision = "🟡 LAYAK (TUNGGU 15m)"
             
         # Overwrite if Daily is critical fail
@@ -326,15 +390,17 @@ class TraderChecklist:
         for d in self.details['daily']:
             if d.get('status') == 'STOP':
                 decision = "🔴 TIDAK LAYAK (Daily Bearish)"
-                # total_score = 0  <-- Removed to show actual score even if stopped
-                # But we ensure decision is red/stop
+                # Invalidate all scores? Or just flag it. 
+                # User said "Skor total otomatis tidak layak".
+                # We will handle this in final summation.
                 decision = "🔴 TIDAK LAYAK (Daily Bearish)"
                 
         return {
             "symbol": self.symbol,
-            "total_score": total_score,
+            "total_score": final_score,
             "decision": decision,
             "scores": self.scores,
             "max_scores": self.max_scores,
-            "details": self.details
+            "details": self.details,
+            "metrics": self.metrics # New Export
         }

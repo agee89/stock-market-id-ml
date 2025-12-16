@@ -93,7 +93,7 @@ try:
     res = requests.get(f"{API_URL}/stocks")
     if res.status_code == 200:
         data = res.json()
-        stocks = [s['symbol'] for s in data if s['symbol'] not in ['IDR=X', '^JKSE']]
+        stocks = [s['symbol'] for s in data if s['symbol'] not in ['IDR=X', '^JKSE', 'USDIDR=X', '^DJI', '^IXIC', '^GSPC']]
         # Create map for display: "BBCA.JK" -> "BBCA.JK (Bank Central Asia)"
         for s in data:
             name_display = s['name'] if s['name'] else "Unknown"
@@ -135,9 +135,23 @@ if not stocks:
     """)
     st.stop() # Stop execution here so the rest of the dashboard doesn't render with None
 
+# Parse Query Param for Symbol
+qp_symbol = st.query_params.get("symbol", None)
+default_sym_idx = 0
+
+if qp_symbol:
+    # Check if symbol exists in list
+    if qp_symbol in stocks:
+        default_sym_idx = stocks.index(qp_symbol)
+    else:
+        # Maybe user passed just "ASII" but we have "ASII.JK"
+        # Try fuzzy match? For now strict.
+        pass
+        
 selected_symbol = st.sidebar.selectbox(
     "Select Stock", 
     stocks,
+    index=default_sym_idx,
     format_func=format_stock_label
 )
 
@@ -430,34 +444,48 @@ def render_live_metrics(symbol, interval, start_date, end_date, limit):
             curr = d['history'][0]['close']
             
         # Call Logic
+        # Call Logic & Narrative
+        horizon_map = {
+            "1m": "10-30 Menit",
+            "15m": "Sesi Ini / 1-2 Jam",
+            "1h": "Sore Ini / Besok Pagi",
+            "1d": "1-3 Hari (Swing)"
+        }
+        time_horizon = horizon_map.get(interval, "N/A")
+        
         if pct > 0.2: # Mildly Bullish threshold
             call_color = "green"
             call_icon = "🟢"
             call_text = "BELI (BUY)"
-            msg = f"Potensi NAIK menuju Target."
+            action_msg = f"**Action:** Entry di **Rp {curr:,.0f}**. Pasang Jual di **Rp {target:,.0f}**."
+            horizon_msg = f"⏱️ **Horizon:** {time_horizon}"
             container_func = st.success
         elif pct < -0.2:
             call_color = "red"
             call_icon = "🔴"
-            call_text = "JUAL / HINDARI (SELL)"
-            msg = f"Potensi TURUN/Koreksi."
+            call_text = "JUAL / HINDARI"
+            action_msg = f"**Action:** Amankan Profit atau Hindari Entry."
+            horizon_msg = f"⏱️ **Horizon:** {time_horizon} (Koreksi)"
             container_func = st.error
         else:
             call_color = "gray"
             call_icon = "⚪"
             call_text = "TUNGGU (WAIT)"
-            msg = "Pasar Sideways atau belum ada konfirmasi kuat."
+            action_msg = "**Action:** Jangan Entry dulu. Pasar belum konfirmasi."
+            horizon_msg = f"⏱️ **Horizon:** Menunggu Sinyal"
             container_func = st.warning
             
         with st.container():
             # Use columns to center or make it prominent
-            c_call_1, c_call_2 = st.columns([2, 1])
+            c_call_1, c_call_2 = st.columns([1.5, 1])
             with c_call_1:
                 container_func(f"### {call_icon} REKOMENDASI: {call_text}")
-                st.markdown(f"**⏰ Waktu Target:** {t_date}")
+                st.markdown(action_msg)
+                st.markdown(horizon_msg)
             with c_call_2:
                 st.metric("🎯 Target Harga", f"Rp {target:,.0f}", f"{pct:+.2f}%")
-                st.caption(f"Entry/Current: Rp {curr:,.0f}")
+                # Add Stop Loss Estimate (Support) if possible, for now just Target date
+                st.caption(f"Valid Until: {t_date}")
                 
     st.caption(f"Timeframe: {interval} | Model: LSTM + XGBoost | Last Data: {last_collect} | Next: {next_update} | Status: {market_status}")
 
@@ -1129,15 +1157,32 @@ with tab2:
 # Bottom Actions
 st.divider()
 st.subheader("⚙️ System Control")
-if st.button(f"🚀 Force Retrain ({selected_interval})"):
-    try:
-        res = requests.post(f"{API_URL}/train/{selected_symbol}?interval={selected_interval}")
-        if res.status_code == 200:
-            st.success(f"Training started for {selected_symbol} {selected_interval}!")
-        else:
-            st.error("Failed to start training.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+
+col_train_1, col_train_2 = st.columns(2)
+
+with col_train_1:
+    if st.button(f"🚀 Force Retrain ({selected_interval})"):
+        try:
+            res = requests.post(f"{API_URL}/train/{selected_symbol}?interval={selected_interval}")
+            if res.status_code == 200:
+                st.success(f"Training started for {selected_symbol} {selected_interval}!")
+            else:
+                st.error("Failed to start training.")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+with col_train_2:
+    if st.checkbox("Unlock Mass Retrain"):
+        if st.button("⚡ Mass Retrain ALL (10-20m)"):
+             try:
+                res = requests.post(f"{API_URL}/train/all")
+                if res.status_code == 200:
+                    st.toast("✅ Mass Retrain Started! Check logs/app.log")
+                    # No rerun needed, just toast
+                else:
+                    st.error(f"Failed: {res.text}")
+             except Exception as e:
+                st.error(f"Error: {e}")
 
 st.markdown("---")
 # Initialize state for delete confirmation

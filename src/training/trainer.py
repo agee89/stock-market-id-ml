@@ -24,8 +24,17 @@ class ModelTrainer:
         self.db = SessionLocal()
         self.collector = StockCollector(self.db)
         self.feature_engine = TechnicalIndicators(self.db) 
-        self.preprocessor = DataPreprocessor( sequence_length=60)
         self.interval = interval
+        
+        # Adaptive Sequence Length
+        seq_config = {
+            '1d': 60,
+            '1h': 48,
+            '15m': 96,
+            '1m': 120
+        }
+        self.seq_len = seq_config.get(interval, 60)
+        self.preprocessor = DataPreprocessor(sequence_length=self.seq_len)
         
         settings = get_settings()
         self.redis = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0, decode_responses=True)
@@ -99,14 +108,10 @@ class ModelTrainer:
         # Ensure index is datetime
         df.index = pd.to_datetime(df.index)
         df.dropna(inplace=True)
+        # Force float to avoid Decimal issues
+        df = df.astype(float)
 
-        # --- A. FEATURE ENGINEERING: TECHNICAL INDICATORS ---
-        try:
-            df = self.feature_engine.calculate_indicators(df)
-        except Exception as e:
-            logger.error(f"Failed to calculate indicators: {e}")
-
-        # --- B. FEATURE ENGINEERING: NEWS SENTIMENT ---
+        # --- A. FEATURE ENGINEERING: NEWS SENTIMENT ---
         try:
             sent_query = text("""
                 SELECT date, sentiment_score 
@@ -127,7 +132,7 @@ class ModelTrainer:
             logger.error(f"Failed to fetch sentiment: {e}")
             df['sentiment_score'] = 0.0
 
-        # --- C. FEATURE ENGINEERING: MACRO CONTEXT ---
+        # --- B. FEATURE ENGINEERING: MACRO CONTEXT ---
         try:
             # Fetch IHSG
             ihsg_id_res = self.db.execute(text("SELECT id FROM stocks WHERE symbol='^JKSE'")).fetchone()
@@ -161,13 +166,57 @@ class ModelTrainer:
                     # Merge
                     df = pd.merge(df, usd_df, left_index=True, right_index=True, how='left')
                     df['usd_close'] = df['usd_close'].fillna(method='ffill')
+
+            # Fetch DJI (Dow Jones)
+            dji_id_res = self.db.execute(text("SELECT id FROM stocks WHERE symbol='^DJI'")).fetchone()
+            if dji_id_res:
+                dji_query = text("""
+                    SELECT timestamp as date, close as dji_close FROM stock_prices 
+                    WHERE stock_id = :sid AND interval = :interval
+                """)
+                dji_data = self.db.execute(dji_query, {"sid": dji_id_res[0], "interval": self.interval}).fetchall()
+                if dji_data:
+                    dji_df = pd.DataFrame(dji_data, columns=['date', 'dji_close'])
+                    dji_df['date'] = pd.to_datetime(dji_df['date'])
+                    dji_df.set_index('date', inplace=True)
+                    df = pd.merge(df, dji_df, left_index=True, right_index=True, how='left')
+                    df['dji_close'] = df['dji_close'].fillna(method='ffill')
+
+            # Fetch IXIC (Nasdaq)
+            ixic_id_res = self.db.execute(text("SELECT id FROM stocks WHERE symbol='^IXIC'")).fetchone()
+            if ixic_id_res:
+                ixic_query = text("""
+                    SELECT timestamp as date, close as ixic_close FROM stock_prices 
+                    WHERE stock_id = :sid AND interval = :interval
+                """)
+                ixic_data = self.db.execute(ixic_query, {"sid": ixic_id_res[0], "interval": self.interval}).fetchall()
+                if ixic_data:
+                    ixic_df = pd.DataFrame(ixic_data, columns=['date', 'ixic_close'])
+                    ixic_df['date'] = pd.to_datetime(ixic_df['date'])
+                    ixic_df.set_index('date', inplace=True)
+                    df = pd.merge(df, ixic_df, left_index=True, right_index=True, how='left')
+                    df['ixic_close'] = df['ixic_close'].fillna(method='ffill')
             
             # Fill remaining macro NaNs with 0 or mean
+            df.fillna(method='ffill', inplace=True)
+            df.fillna(method='bfill', inplace=True)
+            
+            # CRITICAL: Re-cast to float because merged macro columns might be Decimal
+            df = df.astype(float)
             if 'ihsg_close' in df.columns: df['ihsg_close'].fillna(method='bfill', inplace=True)
             if 'usd_close' in df.columns: df['usd_close'].fillna(method='bfill', inplace=True)
+            if 'dji_close' in df.columns: df['dji_close'].fillna(method='bfill', inplace=True)
+            if 'ixic_close' in df.columns: df['ixic_close'].fillna(method='bfill', inplace=True)
 
         except Exception as e:
              logger.error(f"Failed to merge macro features: {e}")
+
+        # --- C. FEATURE ENGINEERING: TECHNICAL INDICATORS ---
+        try:
+            # Pass interval to calculation
+            df = self.feature_engine.calculate_indicators(df, interval=self.interval)
+        except Exception as e:
+            logger.error(f"Failed to calculate indicators: {e}")
 
         # Define Expanded Features List
         features = ['close', 'volume', 'open', 'high', 'low', 
@@ -175,8 +224,24 @@ class ModelTrainer:
                    'bb_upper', 'bb_lower', 
                    'sentiment_score']
         
+        # Add Macro if available
         if 'ihsg_close' in df.columns: features.append('ihsg_close')
         if 'usd_close' in df.columns: features.append('usd_close')
+        if 'dji_close' in df.columns: features.append('dji_close')
+        if 'ixic_close' in df.columns: features.append('ixic_close')
+
+        # Add Timeframe-Specific Features
+        if self.interval == '1d':
+            features.extend(['relative_strength', 'volatility_regime', 'adx', 'volume_ma_ratio', 'ihsg_lag1', 'usd_idr_lag1'])
+        elif self.interval == '1h':
+            features.extend(['hour_sin', 'hour_cos', 'ema_5', 'ema_13', 'microtrend', 'sentiment_decay'])
+        elif self.interval == '15m':
+            features.extend(['vwap', 'distance_from_vwap', 'buy_pressure', 'sell_pressure', 'order_flow', 'high_low_ratio'])
+        elif self.interval == '1m':
+            features.extend(['tick_direction', 'momentum_1min', 'momentum_decay', 'realized_vol', 'volume_spike'])
+        
+        # Filter only existing columns (safety)
+        features = [f for f in features if f in df.columns]
 
         # Create Target: Next Day Close (Shift -1)
         df['target'] = df['close'].shift(-1)
@@ -212,8 +277,8 @@ class ModelTrainer:
 
         # 5. Train LSTM
         if len(X_train) > 0:
-            lstm = LSTMModel(input_shape=(X_train.shape[1], X_train.shape[2]))
-            lstm.train(X_train, y_train, epochs=5) # Short epochs for test
+            lstm = LSTMModel(input_shape=(X_train.shape[1], X_train.shape[2]), timeframe=self.interval)
+            lstm.train(X_train, y_train, epochs=10) # Increased epochs slightly
             
             # Evaluate
             preds = lstm.predict(X_test)
@@ -507,65 +572,79 @@ class ModelTrainer:
 
 if __name__ == "__main__":
     import time
-    
+    import argparse
+    import sys
+
+    # Parse Arguments
+    parser = argparse.ArgumentParser(description="Stock Market ID AI Trainer")
+    parser.add_argument("--all", action="store_true", help="Run once for all stocks and exit")
+    parser.add_argument("--interval", type=str, default="1d", help="Timeframe (1d, 1h, 15m, 1m)")
+    args = parser.parse_args()
+
     # Configuration
-    # We want to train models for different timeframes
-    # For now, let's just loop through them.
-    # In production, this should be handled by Celery or robust scheduler.
-    
-    intervals = ['1d', '1h', '15m', '1m']
-    logger.info("Starting Continuous Model Trainer...")
-    
-    while True:
+    if args.interval:
+        intervals = [args.interval]
+    else:
+        intervals = ['1d', '1h', '15m', '1m']
+
+    logger.info(f"Starting Trainer... Mode: {'ONE-OFF' if args.all else 'CONTINUOUS'}, Intervals: {intervals}")
+
+    def get_all_symbols():
+        db = SessionLocal()
         try:
-            # Dynamic: Fetch all stocks from DB
-            db = SessionLocal()
-            try:
-                res = db.execute(text("SELECT symbol FROM stocks"))
-                symbols = [row[0] for row in res.fetchall()]
-            except Exception as e:
-                logger.error(f"Failed to fetch stock list: {e}")
-                symbols = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"] # Fallback
-            finally:
-                db.close()
-                
-            for symbol in symbols:
-                for interval in intervals:
-                    try:
-                        logger.info(f"--- Training {symbol} [{interval}] ---")
-                        
-                        # Dynamic history fetch limits based on YFinance constraints
-                        if interval == '1m':
-                            days_history = 7
-                        elif interval in ['5m', '15m']:
-                            days_history = 59 # slightly less than 60 limit
-                        elif interval == '1h':
-                            days_history = 729
-                        else:
-                            days_history = 3650
-                            
-                        # Pass dynamic history days to fetch_history, override default inside run_pipeline if needed
-                        # But run_pipeline calls fetch_history internally with hardcoded 3650 currently.
-                        # We must modify run_pipeline signature or logic first.
-                        # Wait, I can't pass 'days' to run_pipeline easily without changing its signature.
-                        # Actually, looking at line 53 of original file: self.collector.fetch_history(symbol, days=3650, interval=self.interval)
-                        
-                        trainer = ModelTrainer(interval=interval)
-                        # We need to change the hardcoded 3650 inside run_pipeline.
-                        # Since I can't change run_pipeline from here, I must EDIT run_pipeline method instead.
-                        trainer.run_pipeline(symbol)
-                    except Exception as e:
-                        logger.error(f"Training failed for {symbol} {interval}: {e}")
-            
-            logger.info("Cycle completed. Sleeping for 1 hour...")
-            # Sleep for 1 hour before next cycle (adjust as needed for 'real-time' feeling)
-            # For 1m data, you might want shorter sleep.
-            # But retraining LSTM is heavy. 1 hour is reasonable compromise for MVP.
-            time.sleep(3600) 
-            
-        except KeyboardInterrupt:
-            logger.info("Trainer stopped by user.")
-            break
+            res = db.execute(text("SELECT symbol FROM stocks"))
+            syms = [row[0] for row in res.fetchall()]
+            # Filter bad symbols if any
+            syms = [s for s in syms if s.upper() not in ['^JKSE', 'IDR=X', 'USDIDR=X', '^DJI', '^IXIC', 'ALL', 'all']] 
+            return syms
         except Exception as e:
-            logger.critical(f"Trainer loop crashed: {e}")
-            time.sleep(60) # Wait before restart
+            logger.error(f"Failed to fetch stock list: {e}")
+            return ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
+        finally:
+            db.close()
+
+    if args.all:
+        # --- ONE-OFF MODE (Mass Retrain) ---
+        symbols = get_all_symbols()
+        logger.info(f"Found {len(symbols)} stocks to train.")
+        
+        for symbol in symbols:
+            for interval in intervals:
+                try:
+                    logger.info(f"--- Training {symbol} [{interval}] ---")
+                    
+                    # Hardcoded history settings matching previous logic
+                    # Ideally this logic matches fetch_history defaults
+                    
+                    trainer = ModelTrainer(interval=interval)
+                    trainer.run_pipeline(symbol)
+                except Exception as e:
+                    logger.error(f"Training failed for {symbol} {interval}: {e}")
+        
+        logger.info("Mass Retraining Completed Successfully.")
+        sys.exit(0)
+
+    else:
+        # --- CONTINUOUS MODE (Daemon) ---
+        while True:
+            try:
+                symbols = get_all_symbols()
+                
+                for symbol in symbols:
+                    for interval in intervals:
+                        try:
+                            logger.info(f"--- Training {symbol} [{interval}] ---")
+                            trainer = ModelTrainer(interval=interval)
+                            trainer.run_pipeline(symbol)
+                        except Exception as e:
+                            logger.error(f"Training failed for {symbol} {interval}: {e}")
+                            
+                logger.info("Cycle completed. Sleeping for 1 hour...")
+                time.sleep(3600) 
+                
+            except KeyboardInterrupt:
+                logger.info("Trainer stopped by user.")
+                break
+            except Exception as e:
+                logger.critical(f"Trainer loop crashed: {e}")
+                time.sleep(60)

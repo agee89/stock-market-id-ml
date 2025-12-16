@@ -38,13 +38,25 @@ class LivePredictor:
                 # logger.debug(f"LivePredictor: No model found for {symbol} {interval}. Skipping.")
                 return
 
-            # 3. Fetch Data (Need last 300 rows for indicators + sequence)
-            query = text("""
+            # Adaptive Sequence Length
+            seq_config = {
+                '1d': 60,
+                '1h': 48,
+                '15m': 96,
+                '1m': 120
+            }
+            seq_len = seq_config.get(interval, 60)
+
+            # 3. Fetch Data (Need buffer for indicators + sequence)
+            # Fetch 2x sequence length + 200 for indicators warmup
+            limit_rows = seq_len * 2 + 200
+            
+            query = text(f"""
                 SELECT timestamp, open, high, low, close, volume
                 FROM stock_prices 
                 WHERE stock_id = :sid AND interval = :interval
                 ORDER BY timestamp DESC
-                LIMIT 300
+                LIMIT {limit_rows}
             """)
             res = self.db.execute(query, {"sid": stock_id, "interval": interval}).fetchall()
             
@@ -55,6 +67,12 @@ class LivePredictor:
             # Convert to DF and toggle to Ascending (Old -> New)
             df = pd.DataFrame(res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # CRITICAL: Ensure all numeric columns are float to avoid Decimal vs Float errors
+            cols = ['open', 'high', 'low', 'close', 'volume']
+            for c in cols:
+                df[c] = df[c].astype(float)
+                
             df = df.iloc[::-1].sort_values('timestamp')
             df.set_index('timestamp', inplace=True)
 
@@ -75,11 +93,6 @@ class LivePredictor:
             
             df['sentiment_score'] = current_sentiment
 
-            # 4. Feature Engineering
-            from src.feature_engineering.technical_indicators import TechnicalIndicators
-            ti = TechnicalIndicators(self.db)
-            df = ti.calculate_indicators(df)
-            
             # --- MACRO DATA MERGING ---
             # Fetch ^JKSE and IDR=X data to match Trainer logic
             macro_featuers = []
@@ -99,6 +112,7 @@ class LivePredictor:
                         if m_res:
                             m_df = pd.DataFrame(m_res, columns=['timestamp', col_name])
                             m_df['timestamp'] = pd.to_datetime(m_df['timestamp'])
+                            m_df[col_name] = m_df[col_name].astype(float) # Cast Macro to float
                             m_df.set_index('timestamp', inplace=True)
                             return m_df
                 except Exception as e:
@@ -121,6 +135,11 @@ class LivePredictor:
 
             df.fillna(method='bfill', inplace=True)
             df.fillna(0, inplace=True)
+
+            # 4. Feature Engineering (Now has Macros)
+            from src.feature_engineering.technical_indicators import TechnicalIndicators
+            ti = TechnicalIndicators(self.db)
+            df = ti.calculate_indicators(df, interval=interval)
 
             # --- CHECKLIST SCORE (HYBRID AI) ---
             # We need 1d, 1h, 15m dataframes for the checklist.
@@ -168,16 +187,33 @@ class LivePredictor:
             df['checklist_score'] = checklist_score
 
             # 5. Preprocess
-            # Define standard features list used in training + New Market Context features + Checklist
+            # 5. Preprocess
+            # Define Base Features
             features = ['close', 'volume', 'open', 'high', 'low', 
                        'rsi_14', 'macd', 'macd_signal', 
                        'bb_upper', 'bb_lower', 
-                       'sentiment_score', 
-                       'ihsg_close', 'usd_close', 'dji_close', 'ixic_close', # Macro
-                       'vwap', 'mfi', 'force_index', # Smart Money
-                       'checklist_score'] # Logic Rules
+                       'sentiment_score']
+            
+            # Macro
+            if 'ihsg_close' in df.columns: features.append('ihsg_close')
+            if 'usd_close' in df.columns: features.append('usd_close')
+            if 'dji_close' in df.columns: features.append('dji_close')
+            if 'ixic_close' in df.columns: features.append('ixic_close')
+            
+            # Add Timeframe-Specific Features to match Trainer
+            if interval == '1d':
+                features.extend(['relative_strength', 'volatility_regime', 'adx', 'volume_ma_ratio', 'ihsg_lag1', 'usd_idr_lag1'])
+            elif interval == '1h':
+                features.extend(['hour_sin', 'hour_cos', 'ema_5', 'ema_13', 'microtrend', 'sentiment_decay'])
+            elif interval == '15m':
+                features.extend(['vwap', 'distance_from_vwap', 'buy_pressure', 'sell_pressure', 'order_flow', 'high_low_ratio'])
+            elif interval == '1m':
+                features.extend(['tick_direction', 'momentum_1min', 'momentum_decay', 'realized_vol', 'volume_spike'])
 
-            preprocessor = DataPreprocessor(sequence_length=60)
+            # Filter only existing columns (safety)
+            features = [f for f in features if f in df.columns]
+
+            preprocessor = DataPreprocessor(sequence_length=seq_len)
             
             # Try to load saved scaler
             scaler_path = f"data/models/{symbol}_{interval}_scaler.joblib"
@@ -193,10 +229,10 @@ class LivePredictor:
                 logger.warning(f"Scaler not found at {scaler_path}. Fallback to fit_transform (WARNING: inconsistent scaling).")
                 scaled_df = preprocessor.fit_transform(df, features)
             
-            if len(scaled_df) < 60: return
+            if len(scaled_df) < seq_len: return
 
-            # Shape input: (1, 60, n_features)
-            X = scaled_df[features].values[-60:].reshape(1, 60, len(features))
+            # Shape input: (1, seq_len, n_features)
+            X = scaled_df[features].values[-seq_len:].reshape(1, seq_len, len(features))
             
             # 6. Predict
             model = LSTMModel.load(model_path)
@@ -251,7 +287,53 @@ class LivePredictor:
             current_close = float(df['close'].iloc[-1])
             expected_change_pct = ((pred_price - current_close) / current_close) * 100
             
+            # --- CONFIDENCE SCORE CALCULATION ---
+            # Heuristic based on features (Vol, Trend, Volume)
+            # 1. Volatility (BB Width) - Lower is better for confidence? Or stability?
+            # actually higher volatility might mean stronger move, but harder to predict.
+            # We use normalized width.
+            try:
+                bb_width = (df['bb_upper'].iloc[-1] - df['bb_lower'].iloc[-1]) / df['bb_middle'].iloc[-1]
+                vol_score = max(0, 1 - bb_width) # 0 to 1
+                
+                # 2. Trend Strength (MACD Delta)
+                trend_s = abs(df['macd'].iloc[-1] - df['macd_signal'].iloc[-1])
+                # Normalize trend_s (0.0 to 100?) - assume 0-50 scaling roughly?
+                # Using tanh to squeeze
+                trend_score = np.tanh(trend_s) 
+                
+                # 3. Volume Confirmation
+                # Volume vs SMA20
+                vol_ratio = df['volume'].iloc[-1] / (df['volume_sma_20'].iloc[-1] + 1e-9)
+                vol_score_conf = min(1.0, vol_ratio / 2.0) # Cap at 2x volume
+                
+                # Composite Score
+                confidence_score = (vol_score * 0.3) + (trend_score * 0.4) + (vol_score_conf * 0.3)
+                
+            except Exception as e:
+                logger.warning(f"Confidence calc error: {e}")
+                confidence_score = 0.5 # Default
+            
+            # Dynamic Threshold
+            CONFIDENCE_THRESHOLDS = {
+                '1m': 0.75,
+                '15m': 0.70,
+                '1h': 0.65,
+                '1d': 0.60
+            }
+            thresh = CONFIDENCE_THRESHOLDS.get(interval, 0.60)
+            
             direction = "UP" if expected_change_pct > 0 else "DOWN"
+            
+            if confidence_score < thresh:
+                direction = "NEUTRAL"
+                logger.info(f"Signal Filtered: Conf {confidence_score:.2f} < {thresh} -> NEUTRAL")
+            else:
+                logger.info(f"Signal Accepted: Conf {confidence_score:.2f} >= {thresh} -> {direction}")
+            
+            # Update DB confidence column is 0-1, schema handles it?
+            # predictions table has 'confidence' column float
+
             
             # 7. Save to DB
             # Determining Prediction Date (Now) and Target Date (Future)
