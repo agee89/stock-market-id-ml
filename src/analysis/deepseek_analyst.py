@@ -4,8 +4,12 @@ import pandas as pd
 import ta
 from openai import OpenAI
 from dotenv import load_dotenv
+import re
+from fastapi import HTTPException
+from src.utils.logger import get_logger
 
 load_dotenv()
+logger = get_logger()
 
 class DeepSeekAnalyst:
     def __init__(self):
@@ -136,10 +140,20 @@ class DeepSeekAnalyst:
                 temperature=0.3, # Low temp for analytical precision
                 max_tokens=1000
             )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"AI Error: {str(e)}"
+            analysis = response.choices[0].message.content
+            return analysis
 
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            logger.error(f"AI Analysis Failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Assuming db is not defined in this context, commenting out or replacing with pass
+            # db.close() 
+            pass # Placeholder if no db to close
+
+    # Placeholder for fetch_macro_data_for_df - needs implementation
 if __name__ == "__main__":
     # Test Run
     analyst = DeepSeekAnalyst()

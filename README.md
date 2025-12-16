@@ -169,6 +169,25 @@ Fitur unggulan untuk trader jangka pendek, mengimplementasikan algoritma scoring
     *   🔴 **Score < 65**: TIDAK LAYAK (Hindari).
 *   **Kriteria**: Memeriksa Tren, Volume, Volatilitas, dan Fundamental dasar secara otomatis.
 
+### 9. AI Call To Action (Banner Signal) 📢
+Fitur instruksi instan yang muncul paling atas di Dashboard:
+*   **Instruksi Jelas**: Kotak Hijau (**BELI**) atau Merah (**JUAL/HINDARI**).
+*   **Target Harga**: Menampilkan harga tujuan spesifik dan persentase potensi profit.
+*   **Waktu Target**: Estimasi kapan harga target tercapai.
+*   **Logika**: Menggunakan ambang batas (*threshold*) dari prediksi AI untuk memberikan perintah eksekusi yang tegas.
+
+### 10. News & Sentiment (DeepSeek AI) 📰
+Tab khusus untuk analisis sentimen berita berbasis AI:
+*   **DeepSeek Engine**: Menggunakan LLM DeepSeek untuk "membaca" judul berita secara kontekstual, bukan sekadar keyword matching.
+*   **Scoring -1 hingga +1**: AI memberikan nilai kuantitatif pada setiap berita.
+    *   **+1.0**: Sangat Bagus (Greed).
+    *   **-1.0**: Sangat Buruk (Fear).
+*   **Hourly Update**: Berita diperbarui setiap jam sesuai jam bursa.
+
+## 📘 Best Practice & Strategi
+Untuk panduan penggunaan strategi trading yang efektif (Timeframe, Entry, Cutloss), silakan baca dokumen terpisah:
+👉 **[BACA PANDUAN BEST PRACTICE DI SINI](bestpractice.md)**
+
 ## 📊 Monitoring & Logs (Continuous Services)
 
 Sistem ini didesain untuk berjalan **Non-Stop (24/7)**.

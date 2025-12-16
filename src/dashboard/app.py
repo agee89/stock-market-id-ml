@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit import fragment
 import requests
 import pandas as pd
 import plotly.graph_objects as go
@@ -100,6 +101,16 @@ try:
             if len(name_display) > 25:
                 name_display = name_display[:25] + "..."
             stock_map[s['symbol']] = f"{s['symbol']} ({name_display})"
+
+    # User Request: Default to ASII.JK
+    if not stocks: # Should not happen if API works
+         pass
+    else:
+        # Move ASII.JK to front if exists
+        target = "ASII.JK"
+        if target in stocks:
+             stocks.insert(0, stocks.pop(stocks.index(target)))
+             
 except:
     st.sidebar.error("API Error: Cannot fetch stocks")
 
@@ -297,11 +308,10 @@ def get_next_update_time():
 # Use mapped name for title
 display_title = stock_map.get(selected_symbol, selected_symbol)
 st.title(f"📈 {display_title}")
-# Placeholder for status
-status_caption = st.empty()
-status_caption.caption(f"Timeframe: {selected_interval} | Model: LSTM + XGBoost | Last Collect Data: ...")
+
 
 # Function to fetch data
+@st.cache_data(ttl=15)
 def fetch_dashboard_data(symbol, interval, start_date=None, end_date=None, limit=100):
     data = {}
     
@@ -310,7 +320,9 @@ def fetch_dashboard_data(symbol, interval, start_date=None, end_date=None, limit
         pred_res = requests.get(f"{API_URL}/predict/{symbol}?interval={interval}")
         if pred_res.status_code == 200:
             data['prediction'] = pred_res.json()
-    except:
+    except Exception as e:
+        # Don't error in cache function to avoid caching errors? 
+        # Actually it's better to return what we have.
         pass
         
     # 2. History
@@ -318,7 +330,7 @@ def fetch_dashboard_data(symbol, interval, start_date=None, end_date=None, limit
         hist_res = requests.get(f"{API_URL}/history/{symbol}?interval={interval}")
         if hist_res.status_code == 200:
             data['history'] = hist_res.json()
-    except:
+    except Exception as e:
         pass
         
     # 3. Metrics (Model Performance)
@@ -326,8 +338,8 @@ def fetch_dashboard_data(symbol, interval, start_date=None, end_date=None, limit
         met_res = requests.get(f"{API_URL}/metrics/{symbol}?interval={interval}")
         if met_res.status_code == 200:
             data['metrics'] = met_res.json()
-    except:
-        pass
+    except Exception as e:
+        pass # Optional
         
     # 4. News (Daily only usually, but good for context)
     try:
@@ -383,95 +395,141 @@ if selected_preset == "All Time":
 
 data = fetch_dashboard_data(selected_symbol, selected_interval, start_date, end_date, limit)
 
-# Update Status with Last Collect Time
-last_collect = "N/A"
-if 'history' in data and data['history']:
-    try:
-        # Check latest date in history
-        # Assuming list, let's find max date safely
-        dates = [pd.to_datetime(d['date']) for d in data['history']]
-        if dates:
-            last_date = max(dates)
-            # Add +7 hours for WIB if the API returns UTC (Collector saves naive, likely UTC or Local? 
-            # Collector logs showed naive. Let's assume it matches DB.
-            # Usually we treat it as WIB in display.
-            # If collector saved naive local time, then it is already WIB.
-            # Let's try formatting directly first.
-            last_collect = last_date.strftime("%d-%b %H:%M WIB")
-    except:
-        pass
+# --- LIVE FRAGMENT: Top Metrics ---
+@fragment(run_every=15)
+def render_live_metrics(symbol, interval, start_date, end_date, limit):
+    # Fetch Data (Cached)
+    # We call it again inside the fragment, but cache handles it
+    # AND because this function runs every 15s independently, it will fetch fresh data if cache expired.
+    d = fetch_dashboard_data(symbol, interval, start_date, end_date, limit)
+    
+    # Update Status with Last Collect Time
+    last_collect = "N/A"
+    if 'history' in d and d['history']:
+        try:
+            dates = [pd.to_datetime(x['date']) for x in d['history']]
+            if dates:
+                last_date = max(dates)
+                last_collect = last_date.strftime("%d-%b %H:%M WIB")
+        except:
+            pass
 
-next_update = get_next_update_time()
-market_status = get_market_status()
-
-status_caption.caption(f"Timeframe: {selected_interval} | Model: LSTM + XGBoost | Last Data Point: {last_collect} | Next Update: {next_update} | Status Bursa: {market_status}")
-
-# Top Metrics Panel
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    current_price = 0
-    if 'history' in data and data['history']:
-        hist = data['history']
-        current_price = hist[0]['close']
-        current_price_date = pd.to_datetime(hist[0]['date']).strftime("%d-%b %H:%M WIB")
+    next_update = get_next_update_time()
+    market_status = get_market_status()
+    
+    # --- AI TRADE CALL (User Request: Large Instructions) ---
+    if 'prediction' in d:
+        p = d['prediction']
+        pct = p.get('expected_change_pct', 0)
+        target = p.get('predicted_price', 0)
+        t_date = p.get('target_date', 'N/A')
         
-        # Calculate Change vs Previous Candle
-        delta_str = None
-        if len(hist) > 1:
-             prev_price = hist[1]['close']
-             chg = (current_price - prev_price) / prev_price * 100
-             diff = current_price - prev_price
-             delta_str = f"{chg:+.2f}% ({diff:,.0f})"
+        # Get Current Price
+        curr = 0
+        if 'history' in d and d['history']:
+            curr = d['history'][0]['close']
+            
+        # Call Logic
+        if pct > 0.2: # Mildly Bullish threshold
+            call_color = "green"
+            call_icon = "🟢"
+            call_text = "BELI (BUY)"
+            msg = f"Potensi NAIK menuju Target."
+            container_func = st.success
+        elif pct < -0.2:
+            call_color = "red"
+            call_icon = "🔴"
+            call_text = "JUAL / HINDARI (SELL)"
+            msg = f"Potensi TURUN/Koreksi."
+            container_func = st.error
+        else:
+            call_color = "gray"
+            call_icon = "⚪"
+            call_text = "TUNGGU (WAIT)"
+            msg = "Pasar Sideways atau belum ada konfirmasi kuat."
+            container_func = st.warning
+            
+        with st.container():
+            # Use columns to center or make it prominent
+            c_call_1, c_call_2 = st.columns([2, 1])
+            with c_call_1:
+                container_func(f"### {call_icon} REKOMENDASI: {call_text}")
+                st.markdown(f"**⏰ Waktu Target:** {t_date}")
+            with c_call_2:
+                st.metric("🎯 Target Harga", f"Rp {target:,.0f}", f"{pct:+.2f}%")
+                st.caption(f"Entry/Current: Rp {curr:,.0f}")
+                
+    st.caption(f"Timeframe: {interval} | Model: LSTM + XGBoost | Last Data: {last_collect} | Next: {next_update} | Status: {market_status}")
 
-        st.metric("Current Price", f"Rp {current_price:,.0f}", delta_str)
-        st.caption(f"Valid: {current_price_date}")
-    else:
-        st.metric("Current Price", "N/A")
-        st.caption("Valid: N/A")
+    # Top Metrics Panel
+    col1, col2, col3, col4, col5 = st.columns(5)
 
-with col2:
-    if 'prediction' in data:
-        pred = data['prediction']['predicted_price']
-        change_pct = data['prediction']['expected_change_pct']
-        delta = pred - current_price
-        target_date = data['prediction'].get('target_date', 'N/A')
-        if target_date != 'N/A':
-            target_date = pd.to_datetime(target_date).strftime("%d-%b %H:%M WIB")
-        st.metric("AI Target", f"Rp {pred:,.0f}", f"{change_pct:+.2f}% ({delta:,.0f})")
-        st.caption(f"Target: {target_date}")
-    else:
-        st.metric("AI Target", "Waiting...")
-        st.caption("Target: N/A")
+    with col1:
+        current_price = 0
+        if 'history' in d and d['history']:
+            hist = d['history']
+            current_price = hist[0]['close']
+            current_price_date = pd.to_datetime(hist[0]['date']).strftime("%d-%b %H:%M WIB")
+            
+            # Calculate Change vs Previous Candle
+            delta_str = None
+            if len(hist) > 1:
+                 prev_price = hist[1]['close']
+                 chg = (current_price - prev_price) / prev_price * 100
+                 diff = current_price - prev_price
+                 delta_str = f"{chg:+.2f}% ({diff:,.0f})"
 
-with col3:
-    if 'winrate' in data:
-        wr = data['winrate']['win_rate']
-        total = data['winrate']['total_trades']
-        # Revert to standard metric. 
-        # delta_color="normal" makes the delta (Trades) Green (if positive) or Red.
-        st.metric("Win Rate", f"{wr:.1f}%", f"{total} Trades", delta_color="normal")
-    else:
-        st.metric("Win Rate", "N/A")
+            st.metric("Current Price", f"Rp {current_price:,.0f}", delta_str)
+            st.caption(f"Valid: {current_price_date}")
+        else:
+            st.metric("Current Price", "N/A")
+            st.caption("Valid: N/A")
 
-with col4:
-    if 'metrics' in data and data['metrics']:
-        rmse = data['metrics']['rmse']
-        st.metric("Error Margin", f"± Rp {rmse:,.0f}", delta_color="inverse")
-    else:
-        st.metric("Error Margin", "N/A")
+    with col2:
+        if 'prediction' in d:
+            pred = d['prediction']['predicted_price']
+            change_pct = d['prediction']['expected_change_pct']
+            delta = pred - current_price
+            target_date = d['prediction'].get('target_date', 'N/A')
+            if target_date != 'N/A':
+                target_date = pd.to_datetime(target_date).strftime("%d-%b %H:%M WIB")
+            st.metric("AI Target", f"Rp {pred:,.0f}", f"{change_pct:+.2f}% ({delta:,.0f})")
+            st.caption(f"Target: {target_date}")
+        else:
+            st.metric("AI Target", "Waiting...")
+            st.caption("Target: N/A")
 
-with col5:
-    if 'metrics' in data and data['metrics']:
-        samples = data['metrics'].get('training_samples', 0)
-        # Assuming 1 year ~ 250 trading days
-        years = samples / 250
-        st.metric("Data Knowledge", f"{samples} Days", f"{years:.1f} Years")
-    else:
-        st.metric("Data Knowledge", "0 Days")
+    with col3:
+        if 'winrate' in d:
+            wr = d['winrate']['win_rate']
+            total = d['winrate']['total_trades']
+            st.metric("Win Rate", f"{wr:.1f}%", f"{total} Trades", delta_color="normal")
+        else:
+            st.metric("Win Rate", "N/A")
+
+    with col4:
+        if 'metrics' in d and d['metrics']:
+            rmse = d['metrics']['rmse']
+            st.metric("Error Margin", f"± Rp {rmse:,.0f}", delta_color="inverse")
+        else:
+            st.metric("Error Margin", "N/A")
+
+    with col5:
+        if 'metrics' in d and d['metrics']:
+            samples = d['metrics'].get('training_samples', 0)
+            years = samples / 250
+            st.metric("Data Knowledge", f"{samples} Days", f"{years:.1f} Years")
+        else:
+            st.metric("Data Knowledge", "0 Days")
+
+render_live_metrics(selected_symbol, selected_interval, start_date, end_date, limit)
+
+# Fetch Data for Chart & Static Info (Cached)
+data = fetch_dashboard_data(selected_symbol, selected_interval, start_date, end_date, limit)
 
 # AI Intelligence Details
 with st.expander("🧠 AI Brain Details (Model Metadata)", expanded=False):
+
     if 'metrics' in data and data['metrics']:
         m = data['metrics']
         
@@ -597,57 +655,70 @@ if 'history' in data and data['history']:
     if selected_interval in ['1m', '5m', '15m', '1h']:
         dtick_format = "%H:%M\n%d-%b" # Show Hour:Minute and Date below
         
-    fig = go.Figure(data=[go.Candlestick(x=chart_df['date'],
-                    open=chart_df['open'],
-                    high=chart_df['high'],
-                    low=chart_df['low'],
-                    close=chart_df['close'],
-                    name='Price')])
-
-    # Calculate Y-Axis Range for the VISIBLE Window (chart_df)
-    # This prevents the chart from being flattened by old high/low prices
-    if not chart_df.empty:
-        y_min = chart_df['low'].min()
-        y_max = chart_df['high'].max()
-        # Add 5% padding
-        y_padding = (y_max - y_min) * 0.05
-        y_range = [y_min - y_padding, y_max + y_padding]
+    if chart_df.empty:
+        st.warning("No data available for the selected range. Try unchecking 'Show Full History' or changing the timeframe.")
     else:
-        y_range = None # Auto
+        fig = go.Figure(data=[go.Candlestick(x=chart_df['date'],
+                        open=chart_df['open'],
+                        high=chart_df['high'],
+                        low=chart_df['low'],
+                        close=chart_df['close'],
+                        name='Price')])
+    
+        # Calculate Y-Axis Range for the VISIBLE Window (chart_df)
+        if not chart_df.empty:
+            y_min = chart_df['low'].min()
+            y_max = chart_df['high'].max()
+            # Add 5% padding
+            y_padding = (y_max - y_min) * 0.05
+            y_range = [y_min - y_padding, y_max + y_padding]
+        else:
+            y_range = None # Auto
+            
+        # Define Rangebreaks (Hide non-trading time)
+        rangebreaks = []
+        # 1. Hide Weekends (Sat, Sun) - Universal
+        rangebreaks.append(dict(bounds=["sat", "mon"])) 
         
-    # Define Rangebreaks (Hide non-trading time)
-    rangebreaks = []
-    rangebreaks.append(dict(bounds=["sat", "mon"])) # Hide Weekends
-    if selected_interval not in ['1d', '1wk', '1mo']:
-        rangebreaks.append(dict(values=["16:15", "08:45"])) # Hide Nights
-        
-    fig.update_layout(
-        title=f"{selected_symbol} - {selected_interval} Chart",
-        xaxis_title="Date",
-        yaxis_title="Price (IDR)",
-        height=500,
-        template="plotly_dark",
-        margin=dict(l=0, r=0, t=40, b=0),
-        xaxis=dict(
-            rangeslider=dict(visible=False), # Disable range slider in Focus Mode to save space? Or Keep it? Let's keep it but optional.
-            type="date",
-            rangebreaks=rangebreaks,
-            tickformat=dtick_format # Apply custom format
-        ),
-        yaxis=dict(
-            range=y_range,
-            autorange=False if y_range else True,
-            fixedrange=False # Allow user to pan Y axis
+        # 2. Hide Non-Trading Hours (Intraday only)
+        # Be careful with mismatched patterns. 
+        # IDX: Close 16:00, Open 09:00.
+        if selected_interval not in ['1d', '1wk', '1mo']:
+            rangebreaks.append(dict(bounds=[16, 9], pattern="hour")) # Hide 16:00 to 09:00
+            
+        fig.update_layout(
+            title=f"{selected_symbol} - {selected_interval} Chart",
+            xaxis_title="Date",
+            yaxis_title="Price (IDR)",
+            height=500,
+            template="plotly_dark",
+            margin=dict(l=0, r=0, t=40, b=0),
+            xaxis=dict(
+                rangeslider=dict(visible=False), # Disable range slider in Focus Mode to save space? Or Keep it? Let's keep it but optional.
+                type="date",
+                rangebreaks=rangebreaks,
+                tickformat=dtick_format # Apply custom format
+            ),
+            yaxis=dict(
+                range=y_range,
+                autorange=False if y_range else True,
+                fixedrange=False # Allow user to pan Y axis
+            )
         )
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No historical data available. Please wait for the Collector to run.")
 
 # History, News, Company & Analysis & Checklist Split
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📜 Trade History", "📰 News & Sentiment", "🏢 Company Profile", "🧠 Smart Analysis", "✅ Trader Checklist", "🤖 AI Analyst"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📈 Live Signal", 
+    "🧠 AI Analyst", 
+    "🏢 Company Profile",
+    "📰 News & Sentiment",
+    "✅ Checklist"
+])
 
-with tab4:
+with tab2:
     st.subheader("Deep Dive Analysis (Technical & Risk)")
     with st.spinner("Analyzing market structure..."):
         try:
@@ -807,130 +878,216 @@ with tab3:
                 st.error("Failed to fetch company profile.")
         except Exception as e:
             st.error(f"Connection error: {e}")
-
-with tab1:
-    if 'signals' in data and data['signals']:
-        st.subheader("Recent Signal Performance")
-        
-        # Show limit warning if needed
-        if len(data['signals']) >= limit:
-            st.warning(f"⚠️ Displaying last {limit} signals. Data truncated for performance.")
-        
-        # Create DataFrame
-        sig_df = pd.DataFrame(data['signals'])
-        
-        # Format Date to WIB
-        try:
-            sig_df['date'] = pd.to_datetime(sig_df['date'])
-            # sig_df['date'] = sig_df['date'] + pd.Timedelta(hours=7) # REMOVE: Historical data is already WIB
         except Exception as e:
-            pass # Keep original if failure
+            st.error(f"Connection error: {e}")
 
-        # Format columns
-        def format_dir(val):
-            return "🛒 BELI" if val == "UP" else "💰 JUAL"
+with tab4:
+    st.subheader(f"📰 AI News Sentiment: {selected_symbol}")
+    
+    # 1. Fetch News Data
+    with st.spinner("Analyzing News..."):
+        try:
+            # We reuse the existing endpoint or query via direct DB access for speed?
+            # Better to add an endpoint, but for now let's query DB directly via helper if possible
+            # OR just assume 'news_sentiment' table is populated.
+            # Real implementation: Call API /news/{symbol}
+            news_res = requests.get(f"{API_URL}/news/{selected_symbol}")
             
-        def format_market_dir(val):
-            return "⬆️ NAIK" if val == "UP" else "⬇️ TURUN"
-
-        # Apply basic transformations
-        # 1. Result Logic (UI Side Correction)
-        def get_result_label(row):
-            if row['is_win'] is not None:
-                return "✅ WIN" if row['is_win'] else "❌ LOSE"
+            if news_res.status_code == 200:
+                news_data = news_res.json()
+                # ROBUST: Handle List vs Dict
+                if isinstance(news_data, list):
+                    articles = news_data
+                else:
+                    articles = news_data.get('articles', [])
+                
+                # 2. Display Top Score
+                if articles:
+                    # Score is same for batch usually, take first
+                    score = articles[0].get('score', 0)
+                    label = articles[0].get('sentiment', 'NEUTRAL')
+                    
+                    col_s1, col_s2 = st.columns([1, 3])
+                    with col_s1:
+                        st.metric("AI Sentiment Score", f"{score:.2f}", delta=label)
+                    with col_s2:
+                        if score > 0.5:
+                            st.success(f"**EXTREMELY BULLISH** ({label})")
+                            st.markdown("Market news is overwhelmingly positive.")
+                        elif score > 0:
+                            st.info(f"**MODERATELY BULLISH** ({label})")
+                        elif score < -0.5:
+                            st.error(f"**EXTREMELY BEARISH** ({label})")
+                            st.markdown("Market news is overwhelmingly negative.")
+                        elif score < 0:
+                            st.warning(f"**MODERATELY BEARISH** ({label})")
+                        else:
+                            st.caption("**NEUTRAL**")
+                            
+                    st.divider()
+                    
+                    # 3. List Headlines
+                    st.markdown("### 📢 Recent Headlines (Analyzed)")
+                    for art in articles[:10]:
+                        # Default to 0 if score missing
+                        sc = art.get('score', 0)
+                        s_icon = "🟢" if sc > 0 else "🔴" if sc < 0 else "⚪"
+                        with st.expander(f"{s_icon} {art['title']}"):
+                            st.caption(f"Source: {art['source']} | Date: {art['date']}")
+                            st.write(f"Link: {art['url']}")
+                            st.info(f"Individual Contribution: {sc}")
+                else:
+                    st.info("No recent news found for this stock.")
+            else:
+                st.warning("Could not fetch news data.")
+        except Exception as e:
+            st.error(f"News Error: {e}")
+with tab1:
+    @fragment(run_every=15)
+    def render_live_history(symbol, interval, start_date, end_date, limit):
+         # Fetch Data (Cached)
+        d = fetch_dashboard_data(symbol, interval, start_date, end_date, limit)
+        
+        if 'signals' in d and d['signals']:
+            st.subheader("Recent Signal Performance")
             
-            # If pending (is_win is None)
-            # Check if it's actually "Market Closed" or "Waiting for Target"
-            # For simplicity, if it's old > 2 hours and still None, maybe data missing?
-            # But let's stick to "WAITING" as it is technically waiting for a result.
-            return "⏳ WAITING"
+            # Show limit warning if needed
+            if len(d['signals']) >= limit:
+                st.warning(f"⚠️ Displaying last {limit} signals. Data truncated for performance.")
             
-        def get_market_label(row):
-            if row['actual_pct']:
-                 val = row['actual_pct']
-                 return "⬆️ NAIK" if val > 0 else "⬇️ TURUN" if val < 0 else "➖ FLAT"
-            return "🔒 CLOSED" # Changed from "Pending" to avoid confusion if market is closed
-
-        sig_df['Result'] = sig_df.apply(get_result_label, axis=1)
-        sig_df['Prediction'] = sig_df['prediction'].apply(format_dir)
-        sig_df['Actual'] = sig_df.apply(lambda x: get_market_label(x), axis=1)
-        
-        # 2. PnL Calculation (Trade Result)
-        # If Signal UP: PnL = ActualPct.
-        # If Signal DOWN: PnL = -ActualPct (Short).
-        # Note: actual_pct in data is (Actual - Entry)/Entry * 100
-        def calc_pnl(row):
-            if not row['actual_pct']: return 0.0
-            direction_mult = 1.0 if row['prediction'] == 'UP' else -1.0
-            return row['actual_pct'] * direction_mult
-
-        sig_df['pnl'] = sig_df.apply(lambda x: calc_pnl(x), axis=1)
-        
-        # Calculate Total PnL
-        # Calculate Total PnL
-        total_pnl = sig_df['pnl'].sum()
-        pnl_color = "normal" if total_pnl >= 0 else "inverse"
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.metric("Total Realized Profit/Loss", f"{total_pnl:.2f}%", help="Sum of PnL from all displayed trades")
-        with col2:
-            hide_flat = st.radio("Display Info:", ["Semua", "Hanya Win/Loss/Open"], index=1)
+            # Create DataFrame
+            sig_df = pd.DataFrame(d['signals'])
             
-        # Filter Data if requested
-        if hide_flat == "Hanya Win/Loss/Open":
-            # Keep rows where PnL != 0 OR Result is WAITING (active)
-            # PnL is 0 if actual_pct is 0. 
-            # We want to keep WAITING even if PnL is 0 (because it's not closed).
-            # We want to hide "CLOSED" / "FLAT" where PnL is 0.
-            sig_df = sig_df[ (sig_df['pnl'].abs() > 0.0001) | (sig_df['Result'] == "⏳ WAITING") ]
+            # Create Price Map for Entry Lookup (Robust)
+            price_map = {}
+            if 'history' in d and d['history']:
+                for h in d['history']:
+                    try:
+                        # Assuming API returns string dates, we fallback to pandas timestamp for matching
+                        dt = pd.to_datetime(h['date'])
+                        price_map[dt] = h['close']
+                    except:
+                        pass
+            
+            # Format Date
+            try:
+                sig_df['date'] = pd.to_datetime(sig_df['date'])
+            except:
+                pass 
 
-        st.dataframe(
-            sig_df,
-            use_container_width=True,
-            column_config={
-                "date": st.column_config.DatetimeColumn("Date", format="D MMM, HH:mm"),
-                "interval": "TF",
-                "entry_price": st.column_config.NumberColumn("Entry Price", format="Rp %.0f"),
-                "predicted_price": st.column_config.NumberColumn("Target Price", format="Rp %.0f"),
-                "actual_price": st.column_config.NumberColumn("Close Price", format="Rp %.0f"),
-                "Actual": "Market",
-                "actual_price": st.column_config.NumberColumn("Close Price", format="Rp %.0f"),
-                "actual_pct": st.column_config.NumberColumn("Market %", format="%.2f%%"),
-                "pnl": st.column_config.NumberColumn("Profit %", format="%.2f%%"),
-                "Result": "Status",
-                "Prediction": "Signal",
-            },
-            column_order=["date", "interval", "entry_price", "Prediction", "predicted_price", "Actual", "actual_price", "pnl", "Result"]
-        )
-        # Better Entry Price: Use Previous Close (row+1)
-        # Because df is sorted DESC, shift(-1) gives older value (Previous Close)
-        sig_df['real_entry'] = sig_df['actual_price'].shift(-1)
-        
-        # Fill Entry: If real_entry exists, use it. Else fall back to calculation.
-        sig_df['entry_price'] = sig_df.apply(
-            lambda x: x['real_entry'] if pd.notnull(x['real_entry']) else (x['predicted_price'] / (1 + x['predicted_pct']/100.0) if x['predicted_price'] else 0), axis=1
-        )
-        
-        # Display Columns
-        # display_cols = ['date', 'interval', 'entry_price', 'direction_label', 'target_price', 'status_label', 'actual_price', 'actual_pct', 'win_label']
-    else:
-        st.info("No trade history yet. Models are building backtest validation...")
+            # Format columns
+            def format_dir(val):
+                return "🛒 BELI" if val == "UP" else "💰 JUAL"
+                
+            def format_market_dir(val):
+                return "⬆️ NAIK" if val == "UP" else "⬇️ TURUN"
 
+            # Apply basic transformations
+            # 1. Result Logic (UI Side Correction)
+            # 2. PnL Calculation (Standard Logic)
+            # User Requirement: use entry price as base.
+            # Formula: (Close - Entry) / Entry * 100% (for UP)
+            
+            def calc_metric(row):
+                # Get Prices (Robustly)
+                curr_actual = row.get('actual_price', 0)
+                curr_entry = row.get('entry_price', 0)
+                
+                if not curr_entry or not curr_actual:
+                    return 0.0
+                
+                # Formula
+                # Percentage Change
+                raw_pct = (curr_actual - curr_entry) / curr_entry
+                
+                # Direction Multiplier
+                # If Prediction UP: Profit if raw_pct > 0
+                # If Prediction DOWN: Profit if raw_pct < 0 (Price went down)
+                direction = 1.0 if row['prediction'] == 'UP' else -1.0
+                
+                pnl = raw_pct * direction * 100.0
+                return pnl
+
+            # Ensure entry_price is calculated BEFORE PnL
+            def get_entry_price(row):
+                if row['date'] in price_map:
+                    return price_map[row['date']]
+                try:
+                    pp = row['predicted_price']
+                    pct = row['predicted_pct']
+                    if pp and pct:
+                         return pp / (1 + pct/100.0)
+                except:
+                    pass
+                return 0
+
+            sig_df['entry_price'] = sig_df.apply(get_entry_price, axis=1)
+            sig_df['pnl'] = sig_df.apply(calc_metric, axis=1)
+
+            # Updated Result & Market Logic based on Entry
+            def get_result_label(row):
+                # Check if trade is still Open/Waiting (No Close Price)
+                entry = row.get('entry_price', 0)
+                close = row.get('actual_price', 0)
+                if not close or not entry: return "⏳ OPEN"
+                
+                # Based on PnL (for Closed trades)
+                # Strict Logic: PnL > 0 is WIN. 
+                # PnL <= 0 is LOSE (Even if Flat 0.00%, prediction failed to generate profit)
+                if row['pnl'] > 0.0001: return "✅ WIN"
+                return "❌ LOSE"
+                
+            def get_market_label(row):
+                # Based on Close vs Entry
+                entry = row.get('entry_price', 0)
+                close = row.get('actual_price', 0)
+                if not close or not entry: return "⏳ WAITING"
+                
+                if close > entry: return "⬆️ NAIK"
+                if close < entry: return "⬇️ TURUN"
+                return "➖ FLAT"
+
+            sig_df['Result'] = sig_df.apply(get_result_label, axis=1)
+            sig_df['Prediction'] = sig_df['prediction'].apply(format_dir)
+            sig_df['Actual'] = sig_df.apply(get_market_label, axis=1)
+
+            # Calculate Total PnL
+            total_pnl = sig_df['pnl'].sum()
+            
+            # Display Total PnL
+            st.metric("Total Realized Profit/Loss", f"{total_pnl:.2f}%", help="Calculated as (Close - Entry) / Entry")
+            
+            st.dataframe(
+                sig_df,
+                use_container_width=True,
+                column_config={
+                    "date": st.column_config.DatetimeColumn("Date", format="D MMM, HH:mm"),
+                    "interval": "TF",
+                    "entry_price": st.column_config.NumberColumn("Entry Price", format="Rp %.0f"),
+                    "predicted_price": st.column_config.NumberColumn("Target Price", format="Rp %.0f"),
+                    "predicted_pct": st.column_config.NumberColumn("Target %", format="%.2f%%"),
+                    "actual_price": st.column_config.NumberColumn("Close Price", format="Rp %.0f"),
+                    "Actual": "Market",
+                    "actual_pct": st.column_config.NumberColumn("Market %", format="%.2f%%"),
+                    "pnl": st.column_config.NumberColumn("Profit %", format="%.2f%%"),
+                    "Result": "Status",
+                    "Prediction": "Signal",
+                },
+                column_order=["date", "interval", "entry_price", "Prediction", "predicted_pct", "predicted_price", "Actual", "actual_price", "pnl", "Result"]
+            )
+        else:
+            st.info("No trade history yet. Models are building backtest validation...")
+            
+    # Render the fragment
+    render_live_history(selected_symbol, selected_interval, start_date, end_date, limit)
+
+# Legacy News Block (Removed - Now in tab4)
+# with tab2: ...
+
+# Merged AI Analyst (DeepSeek) into tab2
 with tab2:
-    if 'news' in data and data['news']:
-        for news in data['news']:
-            sentiment = news['sentiment']
-            color = "🟢" if sentiment == "POSITIVE" else "🔴" if sentiment == "NEGATIVE" else "⚪"
-            with st.expander(f"{color} {news['title']} ({news['date']})"):
-                st.write(f"**Source:** {news['source']}")
-                st.write(f"**Score:** {news['score']:.2f}")
-                st.write(f"[Read Article]({news['url']})")
-    else:
-        st.info("No recent news found.")
-
-with tab6:
-    st.subheader("🤖 AI Trading Analyst (DeepSeek)")
+    st.divider() # Separator between Technical & AI Text
+    st.subheader("🤖 AI Trading Analyst (Generative DeepSeek)")
     st.info("Fitur ini menggunakan AI untuk menganalisa data Multi-Timeframe (Daily, H1, M15) secara real-time.")
     
     if "ai_analysis" not in st.session_state:

@@ -107,28 +107,75 @@ class LivePredictor:
 
             ihsg_df = fetch_macro('^JKSE', 'ihsg_close')
             usd_df = fetch_macro('IDR=X', 'usd_close')
+            dji_df = fetch_macro('^DJI', 'dji_close') # Dow Jones
+            ixic_df = fetch_macro('^IXIC', 'ixic_close') # Nasdaq
             
-            if ihsg_df is not None:
-                df = pd.merge(df, ihsg_df, left_index=True, right_index=True, how='left')
-                df['ihsg_close'] = df['ihsg_close'].fillna(method='ffill')
-            else:
-                df['ihsg_close'] = 0.0
-                
-            if usd_df is not None:
-                df = pd.merge(df, usd_df, left_index=True, right_index=True, how='left')
-                df['usd_close'] = df['usd_close'].fillna(method='ffill')
-            else:
-                df['usd_close'] = 0.0
+            # Merge Macros
+            for m_df, col in [(ihsg_df, 'ihsg_close'), (usd_df, 'usd_close'), 
+                              (dji_df, 'dji_close'), (ixic_df, 'ixic_close')]:
+                if m_df is not None:
+                    df = pd.merge(df, m_df, left_index=True, right_index=True, how='left')
+                    df[col] = df[col].fillna(method='ffill')
+                else:
+                    df[col] = 0.0
 
             df.fillna(method='bfill', inplace=True)
             df.fillna(0, inplace=True)
 
+            # --- CHECKLIST SCORE (HYBRID AI) ---
+            # We need 1d, 1h, 15m dataframes for the checklist.
+            # We already have 'df' which matches the current 'interval'.
+            # We need to fetch the others.
+            
+            from src.analysis.checklist import TraderChecklist
+            
+            checklist_score = 50.0 # Default neutral
+            
+            try:
+                # Helper to fetch formatted DF for checklist
+                def fetch_for_checklist(inv, limit=300):
+                    q = text("SELECT timestamp as date, open as Open, high as High, low as Low, close as Close, volume as Volume FROM stock_prices WHERE stock_id=:sid AND interval=:inv ORDER BY timestamp DESC LIMIT :lim")
+                    r = self.db.execute(q, {"sid": stock_id, "inv": inv, "lim": limit}).fetchall()
+                    if not r: return None
+                    d = pd.DataFrame(r, columns=['date','Open','High','Low','Close','Volume'])
+                    d['date'] = pd.to_datetime(d['date'])
+                    d['Open'] = d['Open'].astype(float)
+                    d['High'] = d['High'].astype(float)
+                    d['Low'] = d['Low'].astype(float)
+                    d['Close'] = d['Close'].astype(float)
+                    d['Volume'] = d['Volume'].astype(int)
+                    d = d.iloc[::-1].sort_values('date') # Oldest first
+                    # Checklist expects simple index or column access? It uses .iloc usually.
+                    return d
+
+                # We need data up to this prediction moment.
+                # Assuming 'df' ends at 'prediction_date'.
+                
+                limit_lookup = 300
+                d_1d = fetch_for_checklist('1d', 300)
+                d_1h = fetch_for_checklist('1h', 300)
+                d_15m = fetch_for_checklist('15m', 300)
+                
+                if d_1d is not None:
+                    cl = TraderChecklist(symbol)
+                    cl.set_data(daily_df=d_1d, hourly_df=d_1h, m15_df=d_15m)
+                    cl_res = cl.calculate()
+                    checklist_score = float(cl_res.get('total_score', 50.0))
+                    logger.info(f"Checklist Score for {symbol}: {checklist_score}")
+            except Exception as e:
+                logger.error(f"Checklist calc failed: {e}")
+
+            df['checklist_score'] = checklist_score
+
             # 5. Preprocess
-            # Define standard features list used in training
+            # Define standard features list used in training + New Market Context features + Checklist
             features = ['close', 'volume', 'open', 'high', 'low', 
                        'rsi_14', 'macd', 'macd_signal', 
                        'bb_upper', 'bb_lower', 
-                       'sentiment_score', 'ihsg_close', 'usd_close']
+                       'sentiment_score', 
+                       'ihsg_close', 'usd_close', 'dji_close', 'ixic_close', # Macro
+                       'vwap', 'mfi', 'force_index', # Smart Money
+                       'checklist_score'] # Logic Rules
 
             preprocessor = DataPreprocessor(sequence_length=60)
             
@@ -153,6 +200,25 @@ class LivePredictor:
             
             # 6. Predict
             model = LSTMModel.load(model_path)
+            
+            # Feature Count Safeguard (Backward Compatibility)
+            # If model was trained on 13 features but we now have 18, slice it.
+            try:
+                expected_input_shape = model.input_shape # (None, 60, n_features)
+                expected_n_features = expected_input_shape[-1]
+                current_n_features = X.shape[2]
+                
+                if expected_n_features != current_n_features:
+                    logger.warning(f"Feature Mismatch: Model expects {expected_n_features}, got {current_n_features}. Slicing input...")
+                    if current_n_features > expected_n_features:
+                        # Assume new features are appended at the end
+                        X = X[:, :, :expected_n_features]
+                    else:
+                        logger.error(f"Critical Sizing Error: Input has {current_n_features} < {expected_n_features} required.")
+                        return
+            except Exception as e:
+                logger.warning(f"Could not verify input shape compatibility: {e}")
+
             pred_scaled = model.predict(X)
             
             # Unscale Prediction
@@ -331,20 +397,19 @@ class LivePredictor:
                 # Fetch current_close at prediction_time (Entry Price)
                 # Timestamp Logic (YFinance/StockPrices):
                 # Row "10:00" contains Close for 10:00-10:15.
-                # Prediction made at 10:00 uses data ending at 10:00 (Row "09:45").
-                # So Entry Price = Close(Row P-Interval).
+                # Prediction made at 10:00 uses data ending at 10:00.
+                # So Entry Price = Close(Row PredictionDate).
+                # Previous logic subtracted delta_entry, which was wrong (shifted back to 09:45).
                 
-                delta_entry = timedelta(minutes=15)
-                if pred_interval == '1h': delta_entry = timedelta(hours=1)
-                elif pred_interval == '1m': delta_entry = timedelta(minutes=1)
-                elif pred_interval == '1d': delta_entry = timedelta(days=1)
+                entry_date = pred_date # Corrected: Use prediction date directly!
                 
-                entry_date = pred_date - delta_entry
-                
-                q_price_entry = text("SELECT close FROM stock_prices WHERE stock_id=:sid AND timestamp=:t")
+                q_price_entry = text("SELECT close, open FROM stock_prices WHERE stock_id=:sid AND timestamp=:t")
                 entry_res = self.db.execute(q_price_entry, {"sid": stock_id, "t": entry_date}).fetchone()
                 
-                if not entry_res: continue
+                if not entry_res: 
+                    # Try fallback to previous candle if exact match missing?
+                    # For now skip.
+                    continue
                 entry_price = float(entry_res[0])
                 
                 actual_dir_val = "UP" if actual_price > entry_price else "DOWN"

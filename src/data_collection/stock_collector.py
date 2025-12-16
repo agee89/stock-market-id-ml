@@ -17,7 +17,8 @@ class StockCollector:
         self.db = db
         # self.symbols = settings.DEFAULT_STOCKS.split(",")
         # User requested NO defaults. Only stocks added via UI should exist.
-        self.symbols = []
+        # BUT we need Macro/Global Indices for the Model to work nicely.
+        self.symbols = ['^JKSE', 'IDR=X', '^DJI', '^IXIC'] 
         self.predictor = LivePredictor(db)
 
     def update_stock_list_in_db(self):
@@ -91,7 +92,8 @@ class StockCollector:
                 try:
                     from src.data_collection.news_collector import NewsCollector
                     news_collector = NewsCollector(self.db)
-                    news_collector.fetch_news(query=f"{symbol} Indonesia Stock", stock_id=stock_id)
+                    # Pass symbol for Yahoo Finance
+                    news_collector.fetch_news(query=f"{symbol} Indonesia Stock", stock_id=stock_id, symbol=symbol)
                 except Exception as e:
                     logger.error(f"News collection failed: {e}")
 
@@ -181,6 +183,18 @@ class StockCollector:
                 # 1m needs less history (max 5 days is OK, but 1 day is faster? kept 5 for safety)
                 days = 5 if interval != '1m' else 2 
                 c = self.fetch_history(symbol, days=days, interval=interval)
+                
+                # Fetch News Hourly (Triggered by 1h interval)
+                if interval == '1h':
+                    try:
+                        stock_id = self.db.execute(text("SELECT id FROM stocks WHERE symbol=:s"), {"s": symbol}).fetchone()[0]
+                        from src.data_collection.news_collector import NewsCollector
+                        nc = NewsCollector(self.db)
+                        # Fetch & Analyze with AI
+                        nc.fetch_news(query=f"{symbol} Stock", stock_id=stock_id, symbol=symbol)
+                    except Exception as e:
+                        logger.error(f"Hourly News Fetch Error {symbol}: {e}")
+
                 if c > 0:
                     self.predictor.predict_and_save(symbol, interval)
             except Exception as e:

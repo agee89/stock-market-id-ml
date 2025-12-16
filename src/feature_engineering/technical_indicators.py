@@ -49,6 +49,16 @@ class TechnicalIndicators:
             # Volume SMA
             df['volume_sma_20'] = ta.trend.sma_indicator(df['volume'], window=20)
 
+            # --- SMART MONEY INDICATORS (Bandarmology Proxies) ---
+            # 1. VWAP (Volume Weighted Average Price) - Institutional Benchmark
+            df['vwap'] = ta.volume.volume_weighted_average_price(df['high'], df['low'], df['close'], df['volume'], window=14)
+            
+            # 2. MFI (Money Flow Index) - RSI with Volume
+            df['mfi'] = ta.volume.money_flow_index(df['high'], df['low'], df['close'], df['volume'], window=14)
+            
+            # 3. Force Index - Buying/Selling Pressure
+            df['force_index'] = ta.volume.force_index(df['close'], df['volume'], window=13)
+
             return df
         except Exception as e:
             logger.error(f"Error calculating indicators: {e}")
@@ -86,17 +96,20 @@ class TechnicalIndicators:
                             INSERT INTO technical_indicators (
                                 stock_id, date, rsi_14, macd, macd_signal, macd_hist,
                                 bb_upper, bb_middle, bb_lower, sma_20, sma_50, sma_200,
-                                ema_12, ema_26, volume_sma_20
+                                ema_12, ema_26, volume_sma_20,
+                                vwap, mfi, force_index
                             ) VALUES (
                                 :stock_id, :date, :rsi, :macd, :macd_sig, :macd_hist,
                                 :bb_up, :bb_mid, :bb_low, :sma20, :sma50, :sma200,
-                                :ema12, :ema26, :vol_sma20
+                                :ema12, :ema26, :vol_sma20,
+                                :vwap, :mfi, :force_index
                             )
                             ON CONFLICT (stock_id, date) DO UPDATE 
                             SET rsi_14=:rsi, macd=:macd, macd_signal=:macd_sig, macd_hist=:macd_hist,
                                 bb_upper=:bb_up, bb_middle=:bb_mid, bb_lower=:bb_low,
                                 sma_20=:sma20, sma_50=:sma50, sma_200=:sma200,
-                                ema_12=:ema12, ema_26=:ema26, volume_sma_20=:vol_sma20
+                                ema_12=:ema12, ema_26=:ema26, volume_sma_20=:vol_sma20,
+                                vwap=:vwap, mfi=:mfi, force_index=:force_index
                         """),
                         {
                             "stock_id": stock_id,
@@ -113,7 +126,10 @@ class TechnicalIndicators:
                             "sma200": row['sma_200'] if pd.notna(row['sma_200']) else None,
                             "ema12": row['ema_12'] if pd.notna(row['ema_12']) else None,
                             "ema26": row['ema_26'] if pd.notna(row['ema_26']) else None,
-                            "vol_sma20": row['volume_sma_20'] if pd.notna(row['volume_sma_20']) else None
+                            "vol_sma20": row['volume_sma_20'] if pd.notna(row['volume_sma_20']) else None,
+                            "vwap": row['vwap'] if pd.notna(row['vwap']) else None,
+                            "mfi": row['mfi'] if pd.notna(row['mfi']) else None,
+                            "force_index": row['force_index'] if pd.notna(row['force_index']) else None
                         }
                     )
                     count += 1

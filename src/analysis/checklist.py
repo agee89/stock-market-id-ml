@@ -21,7 +21,17 @@ class TraderChecklist:
         self.data = {}
         self.info = {}
 
+    def set_data(self, daily_df=None, hourly_df=None, m15_df=None):
+        """Inject dataframes directly (e.g. from Database) to avoid API calls."""
+        if daily_df is not None: self.data['1d'] = daily_df
+        if hourly_df is not None: self.data['1h'] = hourly_df
+        if m15_df is not None: self.data['15m'] = m15_df
+
     def fetch_data(self):
+        # 0. Skip if data already injected (Hybrid Mode)
+        if '1d' in self.data and '1h' in self.data and '15m' in self.data:
+            return
+
         # 1. Fetch Info (Fundamentals)
         ticker = yf.Ticker(self.symbol)
         try:
@@ -31,13 +41,16 @@ class TraderChecklist:
 
         # 2. Fetch Multi-Timeframe Data
         # Daily: Need enough for MA200 (approx 1 year workdays -> 250+. Fetch 2y)
-        self.data['1d'] = ticker.history(period="2y", interval="1d")
+        if '1d' not in self.data:
+            self.data['1d'] = ticker.history(period="2y", interval="1d")
         
         # Hourly: Need enough for MA50 (approx 50h. 1 wk ~ 30h. Fetch 1mo)
-        self.data['1h'] = ticker.history(period="1mo", interval="1h")
+        if '1h' not in self.data:
+            self.data['1h'] = ticker.history(period="1mo", interval="1h")
         
         # 15m: Need enough for MA20 (20 * 15m = 300m = 5h. Fetch 5d)
-        self.data['15m'] = ticker.history(period="5d", interval="15m")
+        if '15m' not in self.data:
+            self.data['15m'] = ticker.history(period="5d", interval="15m")
 
     def analyze_daily(self):
         df = self.data.get('1d')

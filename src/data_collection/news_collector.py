@@ -16,11 +16,26 @@ class NewsCollector:
         # We don't need API Key for Google RSS
     
     def calculate_sentiment_id(self, text_content: str) -> float:
-        """Simple keyword-based sentiment for Indonesian finance news."""
+        """Keyword-based sentiment (Indonesian + English)."""
         text_lower = text_content.lower()
         
-        positive_words = ['naik', 'menguat', 'untung', 'laba', 'dividen', 'bullish', 'hijau', 'positif', 'terbang', 'rekor', 'akumulasi', 'buy']
-        negative_words = ['turun', 'melemah', 'rugi', 'anjlok', 'bearish', 'merah', 'negatif', 'koreksi', 'jual', 'sell', 'cut loss']
+        # Expanded Keyword List
+        positive_words = [
+            # ID
+            'naik', 'menguat', 'untung', 'laba', 'dividen', 'bullish', 'hijau', 'positif', 
+            'terbang', 'rekor', 'akumulasi', 'buy', 'loncat', 'meroket',
+            # EN
+            'up', 'rise', 'gain', 'profit', 'dividend', 'green', 'positive', 
+            'soar', 'record', 'accumulate', 'strong', 'growth'
+        ]
+        negative_words = [
+            # ID
+            'turun', 'melemah', 'rugi', 'anjlok', 'bearish', 'merah', 'negatif', 
+            'koreksi', 'jual', 'sell', 'cut loss', 'longsor', 'suspend',
+            # EN
+            'down', 'fall', 'loss', 'plunge', 'red', 'negative', 
+            'correction', 'drop', 'weak', 'crash', 'suspension'
+        ]
         
         score = 0
         
@@ -35,81 +50,116 @@ class NewsCollector:
         # Clamp between -1 and 1
         return max(min(score, 1.0), -1.0)
 
-    def fetch_news(self, query: str = "Saham", stock_id: int = None):
-        """Fetch news from Google News RSS (Indonesia)."""
-        # Enhance query for local context if it looks like a symbol
-        # e.g. "BBCA.JK" -> "Saham BBCA Bank Central Asia"
-        # query might be "BBCA.JK Indonesia Stock"
+    def fetch_news(self, query: str = "Saham", stock_id: int = None, symbol: str = None):
+        """Fetch news from Yahoo Finance + Google News Fallback."""
+        import yfinance as yf
         
-        # Clean the query
-        clean_query = query.replace(".JK", "").replace("Indonesia Stock", "").strip()
+        articles = []
         
-        # URL Encode
-        encoded_query = urllib.parse.quote_plus(f"saham {clean_query}")
-        
-        # Construct RSS URL for Indonesia (id-ID)
-        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id-ID&gl=ID&ceid=ID:id"
-        
-        logger.info(f"Fetching Google News RSS for: {clean_query}")
-        
-        try:
-            feed = feedparser.parse(rss_url)
-            
-            if not feed.entries:
-                logger.warning(f"No articles found for {search_query}")
-                return
-
-            logger.info(f"Found {len(feed.entries)} articles")
-            
-            count = 0
-            for entry in feed.entries[:10]: # Limit to top 10 recent
-                try:
-                    # Parse date (RSS usually has 'published_parsed' struct_time)
-                    if hasattr(entry, 'published_parsed'):
-                        pub_date = datetime.fromtimestamp(time.mktime(entry.published_parsed))
-                    else:
-                        pub_date = datetime.now()
+        # 1. Yahoo Finance (Direct Ticker News)
+        if symbol:
+            try:
+                logger.info(f"Fetching Yahoo Finance News for {symbol}")
+                yf_news = yf.Ticker(symbol).news
+                if yf_news:
+                    for item in yf_news:
+                        # Converting unix ts
+                        pub_ts = item.get('providerPublishTime', time.time())
+                        pub_date = datetime.fromtimestamp(pub_ts)
                         
-                    date_str = pub_date.strftime('%Y-%m-%d')
+                        articles.append({
+                            'title': item.get('title', ''),
+                            'link': item.get('link', ''),
+                            'source': item.get('publisher', 'Yahoo Finance'),
+                            'date': pub_date
+                        })
+            except Exception as e:
+                logger.warning(f"Yahoo News failed for {symbol}: {e}")
+
+        # 2. Google News Fallback (if Yahoo yielded < 2 articles)
+        if len(articles) < 2:
+            try:
+                # Construct RSS URL for Indonesia (id-ID)
+                # Clean the query
+                clean_query = query.replace(".JK", "").replace("Indonesia Stock", "").strip()
+                encoded_query = urllib.parse.quote_plus(f"saham {clean_query}")
+                rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id-ID&gl=ID&ceid=ID:id"
+                
+                logger.info(f"Fetching Google News RSS for: {clean_query}")
+                feed = feedparser.parse(rss_url)
+                
+                for entry in feed.entries[:5]:
+                    if hasattr(entry, 'published_parsed'):
+                         pub_date = datetime.fromtimestamp(time.mktime(entry.published_parsed))
+                    else:
+                         pub_date = datetime.now()
                     
-                    title = entry.title
-                    link = entry.link
-                    source = entry.source.title if hasattr(entry, 'source') else "Google News"
-                    
-                    # Calculate Sentiment (Indonesian)
-                    sentiment_score = self.calculate_sentiment_id(title)
-                    sentiment_label = "POSITIVE" if sentiment_score > 0 else "NEGATIVE" if sentiment_score < 0 else "NEUTRAL"
-                    
-                    # Save to DB
-                    sql = text("""
-                        INSERT INTO news_sentiment (stock_id, date, title, content, source, url, sentiment_score, sentiment_label)
-                        VALUES (:stock_id, :date, :title, :content, :source, :url, :score, :label)
-                        ON CONFLICT DO NOTHING
-                    """)
-                    
-                    # Note: We don't have a unique constraint on news URL/Title in schema yet,
-                    # so duplicates might pile up. Ideally we should have one.
-                    # For now, let's just insert.
-                    
-                    self.db.execute(sql, {
-                        "stock_id": stock_id,
-                        "date": date_str,
-                        "title": title,
-                        "content": title, # RSS often has no description, use title
-                        "source": source,
-                        "url": link,
-                        "score": sentiment_score,
-                        "label": sentiment_label
+                    articles.append({
+                        'title': entry.title,
+                        'link': entry.link,
+                        'source': entry.source.title if hasattr(entry, 'source') else "Google News",
+                        'date': pub_date
                     })
-                    count += 1
-                except Exception as e:
-                    continue
-            
-            self.db.commit()
-            logger.info(f"Saved {count} new articles from Google News")
-            
-        except Exception as e:
-            logger.error(f"Error fetching Google News: {e}")
+            except Exception as e:
+                logger.error(f"Google News failed: {e}")
+
+        # Process & Save
+        count = 0
+        
+        # AI BATCH ANALYSIS
+        if articles:
+            try:
+                # 3. Analyze Batch with DeepSeek (Dedicated News Analyst)
+                from src.analysis.news_analyst import DeepSeekNewsAnalyst
+                analyst = DeepSeekNewsAnalyst()
+                
+                headlines = [a['title'] for a in articles]
+                # Get single score for the whole batch
+                if not headlines: return
+                
+                logger.info(f"🧠 AI Analyzing {len(headlines)} headlines for {symbol}...")
+                ai_sentiment_score = analyst.analyze_batch(headlines)
+                ai_sentiment_label = "POSITIVE" if ai_sentiment_score > 0 else "NEGATIVE" if ai_sentiment_score < 0 else "NEUTRAL"
+                
+                logger.info(f"🧠 AI Score: {ai_sentiment_score} ({ai_sentiment_label})")
+
+                # Assign this AI score to ALL headlines in this batch for simplicity in ML (Contextual)
+                # Or we could just store it as the latest sentiment.
+                # For now, we save individual records but with the Batch Score 
+                # (Assuming the news event drives the batch sentiment)
+                
+                for art in articles:
+                    try:
+                        title = art['title']
+                        date_str = art['date'].strftime('%Y-%m-%d')
+
+                        sql = text("""
+                            INSERT INTO news_sentiment (stock_id, date, title, content, source, url, sentiment_score, sentiment_label)
+                            VALUES (:stock_id, :date, :title, :content, :source, :url, :score, :label)
+                            ON CONFLICT DO UPDATE SET sentiment_score = :score, sentiment_label = :label
+                        """)
+                        
+                        self.db.execute(sql, {
+                            "stock_id": stock_id,
+                            "date": date_str,
+                            "title": title,
+                            "content": title, 
+                            "source": art['source'],
+                            "url": art['link'],
+                            "score": ai_sentiment_score, # AI Score
+                            "label": ai_sentiment_label
+                        })
+                        count += 1
+                    except Exception as e:
+                        continue
+                
+                self.db.commit()
+                logger.info(f"Saved {count} articles with AI Score {ai_sentiment_score}")
+                
+            except Exception as e:
+                logger.error(f"AI Sentiment Failed: {e}")
+        else:
+             logger.warning(f"No articles found for {symbol}")
 
 if __name__ == "__main__":
     pass
